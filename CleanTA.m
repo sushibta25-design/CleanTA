@@ -6,6 +6,7 @@
 #import <signal.h>
 #import <errno.h>
 #import "CTProtocol.h"
+#import "CTDiagnostics.h"
 
 static const char *CTRequest = "com.sushibta.cleanta.close.v1";
 static const char *CTReply = "com.sushibta.cleanta.result.v1";
@@ -57,7 +58,8 @@ static void CTRespond(uint64_t key, unsigned result) {
 static void CTHandleRequest(void) {
     uint64_t key = 0;
     if (notify_get_state(requestToken,&key) != NOTIFY_STATUS_OK || !CTValidKey(key)) return;
-    if (serverBusy) { CTRespond(key,3); return; }
+    CTLog(@"REQUEST key=%llu",(unsigned long long)key);
+    if (serverBusy) { CTLog(@"REJECT busy"); CTRespond(key,3); return; }
     @try {
         NSString *target = nil;
         for (id proxy in CTProxies()) {
@@ -69,12 +71,15 @@ static void CTHandleRequest(void) {
                 target = bundle;
             }
         }
-        if (!target) { CTRespond(key,3); return; }
+        if (!target) { CTLog(@"REJECT stale PID, disallowed target or missing proxy"); CTRespond(key,3); return; }
         id service = CTService();
         SEL terminate = NSSelectorFromString(@"terminateApplication:forReason:andReport:withDescription:");
         if (![service respondsToSelector:terminate]) { CTRespond(key,3); return; }
+        CTWatch(target);
+        CTLog(@"TERMINATE key=%llu bundle=%@ reason=1 report=NO before=%@",(unsigned long long)key,target,CTProcess(CTPid(target)));
         serverBusy = YES;
         ((void(*)(id,SEL,id,long long,BOOL,id))objc_msgSend)(service,terminate,target,1,NO,@"CleanTA: user requested close");
+        CTLog(@"TERMINATE returned bundle=%@",target);
         int original = (uint32_t)(key >> 2);
         for (int i = 0; i < 2; ++i) {
             if (sampleTokens[i] >= 0) notify_set_state(sampleTokens[i],0);
@@ -85,14 +90,15 @@ static void CTHandleRequest(void) {
                     int pid = CTPid(target);
                     unsigned oldState = CTExists(original);
                     unsigned currentState = pid > 1 ? CTExists(pid) : 2;
+                    CTLog(@"SAMPLE key=%llu second=%d bundle=%@ old=%@ current=%@",(unsigned long long)key,slot == 0 ? 1 : 3,target,CTProcess(original),CTProcess(pid));
                     sample = CTMakeSample(pid,oldState,currentState);
                     if (CTSampleStopped(sample)) result = 1;
-                } @catch (NSException *e) { result = 3; }
+                } @catch (NSException *e) { CTLog(@"SAMPLE exception=%@",e.name); result = 3; }
                 if (sampleTokens[slot] >= 0) notify_set_state(sampleTokens[slot],sample);
                 if (slot == 1) { CTRespond(key,result); serverBusy = NO; }
             });
         }
-    } @catch (NSException *e) { serverBusy = NO; CTRespond(key,3); }
+    } @catch (NSException *e) { serverBusy = NO; CTLog(@"REQUEST exception=%@",e.name); CTRespond(key,3); }
 }
 
 @interface CTWindow : UIWindow
@@ -160,7 +166,8 @@ static CTController *controller;
     UIButton *back = [self button:@"Xong" action:@selector(closePanel)]; back.tag = 1;
     UIButton *reload = [self button:@"Làm mới" action:@selector(reloadApps)]; reload.tag = 2;
     [self.panel addSubview:back]; [self.panel addSubview:reload];
-    UILabel *title = [UILabel new]; title.text = @"CleanTA"; title.textAlignment = NSTextAlignmentCenter;
+    UIButton *trace = [self button:@"Log 60s" action:@selector(startTrace)]; trace.tag = 4; [self.panel addSubview:trace];
+    UILabel *title = [UILabel new]; title.text = @"CleanTA 0.1.3"; title.textAlignment = NSTextAlignmentCenter;
     title.textColor = UIColor.whiteColor; title.font = [UIFont boldSystemFontOfSize:20]; title.tag = 3; [self.panel addSubview:title];
     self.status = [UILabel new]; self.status.font = [UIFont systemFontOfSize:14];
     self.status.textColor = UIColor.lightGrayColor; self.status.numberOfLines = 3; self.status.textAlignment = NSTextAlignmentCenter;
@@ -182,7 +189,8 @@ static CTController *controller;
     CGFloat x = CGRectGetMinX(safe), y = CGRectGetMinY(safe), w = CGRectGetWidth(safe);
     [self.panel viewWithTag:1].frame = CGRectMake(x,y,76,44);
     [self.panel viewWithTag:2].frame = CGRectMake(x+w-100,y,100,44);
-    [self.panel viewWithTag:3].frame = CGRectMake(x+76,y,MAX(0,w-176),44);
+    [self.panel viewWithTag:3].frame = CGRectMake(x+76,y,MAX(0,w-266),44);
+    [self.panel viewWithTag:4].frame = CGRectMake(x+w-190,y,90,44);
     self.status.frame = CGRectMake(x+8,y+44,w-16,62);
     self.table.frame = CGRectMake(x,y+106,w,MAX(0,CGRectGetHeight(safe)-106));
 }
@@ -193,8 +201,14 @@ static CTController *controller;
 }
 - (void)openPanel { [overlay refreshGeometry]; [self.view layoutIfNeeded]; overlay.expanded = YES; self.panel.hidden = NO; [self reloadApps]; }
 - (void)closePanel { self.panel.hidden = YES; overlay.expanded = NO; }
+- (void)startTrace {
+    CTStartTrace();
+    notify_post("com.sushibta.cleanta.trace.v1");
+    self.status.text = @"Đang ghi log 60 giây. Thử đóng app một lần. Log: Library/Logs/CleanTA.";
+}
 - (void)reloadApps {
     if (self.pending || self.loading) return;
+    CTLog(@"REFRESH begin");
     self.loading = YES; self.status.text = @"Đang kiểm tra ứng dụng…";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         NSMutableArray *rows = [NSMutableArray new]; NSString *error = nil;
@@ -206,6 +220,9 @@ static CTController *controller;
                 if (!CTAllowed(proxy)) continue;
                 NSString *bundle = CTGet(proxy,@"applicationIdentifier"); int pid = CTPid(bundle);
                 if (pid <= 1) continue;
+                unsigned existence = CTExists(pid);
+                CTLog(@"ROW bundle=%@ process=%@",bundle,CTProcess(pid));
+                if (existence == 0) continue;
                 NSString *name = CTGet(proxy,@"localizedName");
                 [rows addObject:@{@"bundle":bundle,@"pid":@(pid),@"name":name ?: bundle}];
             }
@@ -214,8 +231,9 @@ static CTController *controller;
             }];
         } @catch(NSException *e) { error = @"Không đọc được ứng dụng. Cần kiểm tra tương thích iOS."; }
         dispatch_async(dispatch_get_main_queue(), ^{
+            CTLog(@"REFRESH complete count=%lu error=%@",(unsigned long)rows.count,error ?: @"none");
             self.loading = NO; self.rows = rows; [self.table reloadData];
-            self.status.text = error ?: (rows.count ? @"Chọn ứng dụng để đóng hẳn trên iPhone và CarPlay." : @"Chưa tìm thấy ứng dụng đang chạy có thể đóng. Thử mở VML rồi làm mới.");
+            self.status.text = error ?: (rows.count ? @"Đã làm mới. Chọn app để gửi lệnh đóng; Log 60s để ghi chẩn đoán." : @"Chưa tìm thấy ứng dụng đang chạy có thể đóng. Thử mở VML rồi làm mới.");
         });
     });
 }
@@ -233,7 +251,7 @@ static CTController *controller;
     [table deselectRowAtIndexPath:index animated:YES]; if (self.pending || self.loading) return;
     NSDictionary *row = self.rows[index.row];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:[@"Đóng " stringByAppendingString:row[@"name"]]
-        message:@"Ứng dụng sẽ dừng trên cả iPhone và CarPlay." preferredStyle:UIAlertControllerStyleAlert];
+        message:@"Gửi yêu cầu đóng và kiểm tra tiến trình. App có thể được mở lại; kết quả sẽ hiện sau 3 giây." preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Đóng ứng dụng" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) { [self closeApp:row]; }]];
     [self presentViewController:alert animated:YES completion:nil];
@@ -241,6 +259,8 @@ static CTController *controller;
 - (void)closeApp:(NSDictionary *)row {
     if (requestToken < 0 || replyToken < 0) { self.status.text = @"Không kết nối được CleanTA. Thử respring."; return; }
     uint64_t key = CTKey([row[@"bundle"] UTF8String],[row[@"pid"] intValue]);
+    CTWatch(row[@"bundle"]);
+    CTLog(@"UI_CLOSE key=%llu bundle=%@ listedPID=%@",(unsigned long long)key,row[@"bundle"],row[@"pid"]);
     self.closingRow = row; self.pending = key; NSUInteger generation = ++self.generation;
     self.status.text = [NSString stringWithFormat:@"%@: PID %@ — kiểm tra ở giây 1 và 3…",row[@"name"],row[@"pid"]];
     if (notify_set_state(requestToken,key) != NOTIFY_STATUS_OK || notify_post(CTRequest) != NOTIFY_STATUS_OK) {
@@ -254,6 +274,7 @@ static CTController *controller;
 }
 - (void)receiveResult:(uint64_t)result {
     if (!self.pending || (result & ~UINT64_C(3)) != self.pending || !(result & 3)) return;
+    CTLog(@"UI_RESULT raw=%llu",(unsigned long long)result);
     uint64_t key = self.pending; self.pending = 0;
     if ((result & 3) == 3) {
         self.status.text = [NSString stringWithFormat:@"%@: chưa thực hiện/kiểm tra được lệnh đóng. Bấm Làm mới.",self.closingRow[@"name"]];
@@ -303,6 +324,7 @@ __attribute__((constructor)) static void CTInit(void) {
         dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",RTLD_LAZY);
         dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices",RTLD_LAZY);
         NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+        CTDiagnosticsInit();
         if ([bundle isEqual:@"com.apple.springboard"] || [bundle isEqual:@"com.apple.CarPlayApp"]) {
             for (int i = 0; i < 2; ++i) {
                 NSString *name = [NSString stringWithFormat:@"com.sushibta.cleanta.sample.v2.%d",i];

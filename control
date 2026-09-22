@@ -1,6 +1,6 @@
 Package: com.sushibta.cleanta
 Name: CleanTA
-Version: 0.1.2
+Version: 0.1.3
 Architecture: iphoneos-arm64
 Description: On-demand app closer for CarPlay. Experimental iOS 15-16 rootless build.
 Maintainer: sushibta

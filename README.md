@@ -40,3 +40,31 @@ Cửa sổ phủ gắn trực tiếp vào UIScreen CarPlay, không gắn vào UI
 Giữ nguyên cơ chế gửi lệnh đóng. Hiện tên ứng dụng, PID trước lệnh và kết quả tại giây 1/3. SpringBoard đối chiếu PID do FrontBoard trả về với `kill(pid, 0)` (chỉ thăm dò tồn tại, không gửi tín hiệu đóng). Nếu API còn trả PID cũ nhưng kernel báo ESRCH, có thể xác nhận tiến trình cũ đã mất. EPERM được xem là còn tồn tại, không phải đã đóng; lỗi đọc không được báo thành công. PID mới còn tồn tại được ghi “Có tiến trình mới”. Không có vòng lặp buộc tắt app.
 
 Ảnh Google Maps còn trên MultiTA không đủ để kết luận app đang chạy: có thể là nội dung được giữ lại hoặc app đã được mở lại. CleanTA chưa gỡ scene của MultiTA. Sau khi đóng, chụp dòng tên/PID/1s/3s, đừng bấm Làm mới trước khi chụp vì nút đó thay dòng trạng thái. Kiểm tra chỉ phản ánh hai thời điểm, không ngăn mở lại sau đó. Kernel probe PID không xác minh thời điểm tạo process; tái sử dụng PID có thể dẫn tới báo chưa đóng (không tự gửi tín hiệu tới PID đó).
+
+
+## 0.1.3 diagnostic build
+
+Tap **Log 60s**, then close Google Maps once (CleanTA or swipe on the iPhone).
+Wait 60 seconds without reopening Maps. In Filza send the entire folder
+`/var/mobile/Library/Logs/CleanTA` (SpringBoard.log, CarPlay.log and any .log.1).
+The log button works without selecting/closing an app. Closing with CleanTA also
+starts a 60-second trace in each participating process. Repeated presses extend it.
+
+Logs include version, wall-clock timestamp, local process ID, request key,
+termination request/return, original/current PID kernel probes at 1 and 3 seconds,
+and process changes polled every 250ms for 60 seconds. Kernel metadata includes
+process start time, parent and state when permission permits; errors are explicit.
+No polling occurs after the trace expires. Files rotate at 512 KiB per process
+with one backup (roughly 2 MiB total, plus one final record per file).
+
+A signature-checked, pass-through observer records FBSSystemService
+openApplication:options:withResult: calls in SpringBoard/CarPlay with stack symbols
+and option keys only. It does not alter arguments or callbacks. This is partial
+coverage: other APIs, runningboardd/carplayd, and other processes are not hooked.
+**No OPEN_REQUEST does not prove that no launch occurred, and PPID does not identify
+the requesting app/tweak.** The startup record states whether the hook installed.
+No URLs, location values, or application content are deliberately collected.
+
+This is a diagnostic build, not a confirmed fix for relaunch. The close mechanism
+is unchanged. Refresh now omits PIDs known to be absent in the kernel and visibly
+acknowledges completion; permission-unknown PIDs are retained conservatively.

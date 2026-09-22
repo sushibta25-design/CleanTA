@@ -5,5 +5,6 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = CleanTA
 CleanTA_FILES = CleanTA.m
 CleanTA_CFLAGS = -fobjc-arc -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations
+CleanTA_LIBRARIES = substrate
 CleanTA_FRAMEWORKS = UIKit Foundation QuartzCore
 include $(THEOS_MAKE_PATH)/tweak.mk
