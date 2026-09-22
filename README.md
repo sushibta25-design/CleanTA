@@ -1,4 +1,4 @@
-# CleanTA 0.1.0 — bản thử Dopamine rootless
+# CleanTA 0.1.1 — bản thử Dopamine rootless
 
 Nút **CT** trên CarPlay mở bảng ứng dụng đang có tiến trình. Có thể kéo nút CT đến vị trí khác. Chọn ứng dụng → **Đóng ứng dụng**. CleanTA yêu cầu SpringBoard kết thúc ứng dụng, chờ một giây rồi kiểm tra lại trước khi báo đã dừng.
 
@@ -6,7 +6,7 @@ Nút **CT** trên CarPlay mở bảng ứng dụng đang có tiến trình. Có 
 
 ## Cài thử
 
-GitHub → Actions → Build CleanTA rootless → lần chạy xanh → tải artifact `CleanTA-0.1.0-rootless`, giải nén, cài `.deb` bằng Sileo/Filza rồi respring. Kết nối lại CarPlay nếu nút CT chưa xuất hiện.
+GitHub → Actions → Build CleanTA rootless → lần chạy xanh → tải artifact `CleanTA-0.1.1-rootless`, giải nén, cài `.deb` bằng Sileo/Filza rồi respring. Kết nối lại CarPlay nếu nút CT chưa xuất hiện.
 
 1. Mở VML và bật tiếng, về Home CarPlay.
 2. Bấm CT → chọn VML → Đóng ứng dụng.
@@ -30,3 +30,7 @@ UIKit overlay passthrough trong CarPlayApp; `LSApplicationWorkspace` liệt kê 
 Mã của ba dự án ConnectTA/MultiTA/Bubble không được thay đổi. Không thêm dependency RocketBootstrap/MRYIPC.
 
 Build: `THEOS=/path/to/theos make package FINALPACKAGE=1` với iOS SDK 16.5. CI build arm64 + arm64e và chạy test kiểm tra đóng gói PID/hash/trạng thái. CI xanh chỉ chứng minh build thành công, không chứng minh private API/CarPlay hoạt động trên máy thật.
+
+## Sửa trong 0.1.1
+
+Cửa sổ phủ gắn trực tiếp vào UIScreen CarPlay, không gắn vào UIWindowScene đầu tiên (có thể là dock). Kích thước lấy từ screen.coordinateSpace, cập nhật khi mở bảng/đổi mode màn hình. Giao diện nền tối với màu chữ và nút xác định rõ. Ngắt màn hình sẽ giải phóng overlay, kết nối lại tạo mới. Cần kiểm tra thực tế toàn màn và thao tác đóng VML; cơ chế đóng ứng dụng giữ nguyên.

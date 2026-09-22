@@ -70,8 +70,21 @@ static void CTHandleRequest(void) {
 @interface CTWindow : UIWindow
 @property(nonatomic,weak) UIView *entry;
 @property(nonatomic,assign) BOOL expanded;
+- (void)refreshGeometry;
 @end
 @implementation CTWindow
+- (void)refreshGeometry {
+    CGRect full = self.screen.coordinateSpace.bounds;
+    if (CGRectIsEmpty(full) || CGRectIsInfinite(full)) return;
+    if (!CGRectEqualToRect(self.frame,full)) self.frame = full;
+    [self.rootViewController.view setNeedsLayout];
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    // Screen geometry, never the bounds of a dock or app-host window.
+    CGRect full = self.screen.coordinateSpace.bounds;
+    if (!CGRectIsEmpty(full) && !CGRectIsInfinite(full) && !CGRectEqualToRect(self.frame,full)) self.frame = full;
+}
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)event {
     if (!self.expanded && ![self.entry pointInside:[self.entry convertPoint:p fromView:self] withEvent:event]) return nil;
     return [super hitTest:p withEvent:event];
@@ -97,6 +110,11 @@ static CTController *controller;
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     [b setTitle:title forState:UIControlStateNormal];
     b.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    b.backgroundColor = UIColor.clearColor;
+    b.tintColor = UIColor.whiteColor;
+    b.titleLabel.numberOfLines = 1;
+    b.titleLabel.adjustsFontSizeToFitWidth = YES;
+    b.titleLabel.minimumScaleFactor = 0.8;
     [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return b;
 }
@@ -108,23 +126,25 @@ static CTController *controller;
     self.entry.accessibilityLabel = @"Mở CleanTA";
     [self.entry addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)]];
     [self.view addSubview:self.entry];
-    self.panel = [UIView new]; self.panel.backgroundColor = UIColor.systemBackgroundColor;
+    self.panel = [UIView new]; self.panel.backgroundColor = [UIColor colorWithWhite:0.07 alpha:1];
     self.panel.hidden = YES; [self.view addSubview:self.panel];
     UIButton *back = [self button:@"Xong" action:@selector(closePanel)]; back.tag = 1;
     UIButton *reload = [self button:@"Làm mới" action:@selector(reloadApps)]; reload.tag = 2;
     [self.panel addSubview:back]; [self.panel addSubview:reload];
     UILabel *title = [UILabel new]; title.text = @"CleanTA"; title.textAlignment = NSTextAlignmentCenter;
-    title.font = [UIFont boldSystemFontOfSize:20]; title.tag = 3; [self.panel addSubview:title];
+    title.textColor = UIColor.whiteColor; title.font = [UIFont boldSystemFontOfSize:20]; title.tag = 3; [self.panel addSubview:title];
     self.status = [UILabel new]; self.status.font = [UIFont systemFontOfSize:14];
-    self.status.numberOfLines = 2; self.status.textAlignment = NSTextAlignmentCenter;
+    self.status.textColor = UIColor.lightGrayColor; self.status.numberOfLines = 2; self.status.textAlignment = NSTextAlignmentCenter;
     [self.panel addSubview:self.status];
     self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.table.backgroundColor = [UIColor colorWithWhite:0.07 alpha:1];
     self.table.delegate = self; self.table.dataSource = self; self.table.rowHeight = 60;
     [self.panel addSubview:self.table];
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews]; CGRect bounds = self.view.bounds;
-    CGRect safe = UIEdgeInsetsInsetRect(bounds,self.view.safeAreaInsets);
+    // This is our independent full-screen surface, not a CarPlay dock scene.
+    CGRect safe = CGRectInset(bounds,8,8);
     if (CGRectIsEmpty(self.entry.frame)) self.entry.frame = CGRectMake(CGRectGetMidX(safe)-22,CGRectGetMinY(safe)+6,44,44);
     CGPoint c = self.entry.center;
     c.x = MAX(CGRectGetMinX(safe)+22,MIN(c.x,CGRectGetMaxX(safe)-22));
@@ -142,7 +162,7 @@ static CTController *controller;
     self.entry.center = CGPointMake(self.entry.center.x+d.x,self.entry.center.y+d.y);
     [g setTranslation:CGPointZero inView:self.view]; [self.view setNeedsLayout];
 }
-- (void)openPanel { overlay.expanded = YES; self.panel.hidden = NO; [self reloadApps]; }
+- (void)openPanel { [overlay refreshGeometry]; [self.view layoutIfNeeded]; overlay.expanded = YES; self.panel.hidden = NO; [self reloadApps]; }
 - (void)closePanel { self.panel.hidden = YES; overlay.expanded = NO; }
 - (void)reloadApps {
     if (self.pending || self.loading) return;
@@ -174,6 +194,8 @@ static CTController *controller;
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)index {
     UITableViewCell *cell = [table dequeueReusableCellWithIdentifier:@"app"];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"app"];
+    cell.backgroundColor = [UIColor colorWithWhite:0.10 alpha:1];
+    cell.textLabel.textColor = UIColor.whiteColor; cell.detailTextLabel.textColor = UIColor.lightGrayColor;
     NSDictionary *row = self.rows[index.row]; cell.textLabel.text = row[@"name"];
     cell.detailTextLabel.text = row[@"bundle"]; cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
@@ -213,12 +235,28 @@ static CTController *controller;
 @end
 
 static void CTAttach(UIWindow *host) {
-    if (overlay || !host || [host isKindOfClass:CTWindow.class] || host.hidden || host.windowLevel != UIWindowLevelNormal || !host.rootViewController) return;
+    if (!host || [host isKindOfClass:CTWindow.class] || host.hidden || host.windowLevel != UIWindowLevelNormal || !host.rootViewController) return;
+    UIScreen *screen = host.screen;
+    if (!screen || CGRectIsEmpty(screen.coordinateSpace.bounds)) return;
+    if (overlay) {
+        // Keep a single overlay; prefer an external display if it appears later.
+        if (overlay.screen != screen && overlay.screen == UIScreen.mainScreen && screen != UIScreen.mainScreen) {
+            overlay.hidden = YES; overlay.screen = screen;
+            [overlay refreshGeometry]; overlay.hidden = NO;
+        }
+        return;
+    }
     controller = [CTController new];
-    overlay = host.windowScene ? [[CTWindow alloc] initWithWindowScene:host.windowScene] : [[CTWindow alloc] initWithFrame:host.bounds];
-    overlay.frame = host.bounds; overlay.backgroundColor = UIColor.clearColor;
+    // CarPlayApp can expose the dock as its first UIWindowScene. Attaching to
+    // that scene clips the entire UI to the dock, even with a larger frame.
+    // A jailbreak overlay is bound directly to the same UIScreen instead.
+    overlay = [[CTWindow alloc] initWithFrame:screen.coordinateSpace.bounds];
+    overlay.screen = screen;
+    overlay.backgroundColor = UIColor.clearColor;
+    overlay.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     overlay.windowLevel = UIWindowLevelAlert + 100; overlay.rootViewController = controller;
-    [controller loadViewIfNeeded]; overlay.entry = controller.entry; overlay.hidden = NO;
+    [controller loadViewIfNeeded]; overlay.entry = controller.entry;
+    [overlay refreshGeometry]; overlay.hidden = NO;
 }
 __attribute__((constructor)) static void CTInit(void) {
     @autoreleasepool {
@@ -236,8 +274,15 @@ __attribute__((constructor)) static void CTInit(void) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
                 [nc addObserverForName:UIWindowDidBecomeVisibleNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { CTAttach(n.object); }];
-                [nc addObserverForName:UISceneDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-                    if (overlay.windowScene == n.object) { overlay.hidden = YES; overlay.rootViewController = nil; overlay = nil; controller = nil; }
+                [nc addObserverForName:UIScreenDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+                    if (overlay.screen == n.object) { overlay.hidden = YES; overlay.rootViewController = nil; overlay = nil; controller = nil; }
+                }];
+                [nc addObserverForName:UIScreenModeDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+                    if (overlay.screen == n.object) [overlay refreshGeometry];
+                }];
+                [nc addObserverForName:UISceneDidActivateNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+                    for (UIWindow *window in UIApplication.sharedApplication.windows) CTAttach(window);
+                    [overlay refreshGeometry];
                 }];
                 for (UIWindow *window in UIApplication.sharedApplication.windows) CTAttach(window);
             });
