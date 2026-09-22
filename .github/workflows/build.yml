@@ -1,0 +1,35 @@
+name: Build CleanTA rootless
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cleanta-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test process identity protocol
+        run: clang -std=c11 -Wall -Wextra -Werror tests/protocol.c -o /tmp/cleanta-test && /tmp/cleanta-test
+      - name: Install dependencies
+        run: brew install ldid xz make
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+      - name: Install iOS SDK
+        run: |
+          curl --fail -L -o /tmp/ios-sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
+          mkdir -p "$THEOS/sdks"
+          tar -xf /tmp/ios-sdk.tar.xz -C "$THEOS/sdks"
+      - name: Build
+        run: gmake clean package FINALPACKAGE=1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CleanTA-0.1.0-rootless
+          path: packages/*.deb
+          if-no-files-found: error
