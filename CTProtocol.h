@@ -20,4 +20,15 @@ static inline int CTSampleStopped(uint64_t value) {
     return (value & 16) && (value & 3) == 0 &&
         (pid == 0 || (pid > 1 && ((value >> 2) & 3) == 0));
 }
+// UI evidence is separate from full-stop success: an API error must not
+// hide a confirmed old-process exit, nor be promoted to proof of no new process.
+enum { CTOutcomeUnknown, CTOutcomeStopped, CTOutcomeNewProcess, CTOutcomeOldExited };
+static inline int CTOutcome(uint64_t sample, int original) {
+    if (!(sample & 16)) return CTOutcomeUnknown;
+    int pid = (int32_t)(sample >> 32);
+    if (pid > 1 && pid != original && ((sample >> 2) & 3) == 1) return CTOutcomeNewProcess;
+    if (CTSampleStopped(sample)) return CTOutcomeStopped;
+    if ((sample & 3) == 0) return CTOutcomeOldExited;
+    return CTOutcomeUnknown;
+}
 #endif

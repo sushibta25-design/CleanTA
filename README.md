@@ -68,3 +68,25 @@ No URLs, location values, or application content are deliberately collected.
 This is a diagnostic build, not a confirmed fix for relaunch. The close mechanism
 is unchanged. Refresh now omits PIDs known to be absent in the kernel and visibly
 acknowledges completion; permission-unknown PIDs are retained conservatively.
+
+
+## 0.1.4 scene diagnostics and result wording
+
+The 60-second trace now also observes DBApplicationSceneViewController foreground,
+background and scene-destruction callbacks, FBSceneManager scene creation, and
+FBScene/FBSScene settings updates where the runtime class and exact ABI match.
+Missing/incompatible methods are logged and skipped; installation is retried on
+trace start for classes loaded late. All original calls/arguments/callbacks pass
+through unchanged. Maximum 300 scene events per trace per process, with stack
+symbols and selected object identifiers (no settings values). All scene events
+are included during this short trace, including other apps, to avoid losing
+activation paths where the target bundle is not directly available.
+Loaded jailbreak image filenames help verify which tweaks actually loaded in
+SpringBoard/CarPlay. Presence of an image or nearby scene event alone does not
+establish causation. Other processes/APIs remain outside observer coverage.
+
+Results distinguish confirmed old PID exit from verified full stop and a new PID.
+API -1 plus an absent old PID now says the old process closed, current process
+unknown; it is NOT interpreted as proof the app cannot be running. The old row
+is removed in this case; Refresh can rediscover a process later. A confirmed new
+PID replaces the stale row immediately. The termination mechanism is unchanged.

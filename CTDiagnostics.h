@@ -58,13 +58,15 @@ static NSString *CTProcess(int pid) {
     }
     return [NSString stringWithFormat:@"pid=%d exists=%u sysctl=%d errno=%d bytes=%lu",pid,exists,result,result ? saved : 0,(unsigned long)length];
 }
+#import "CTSceneDiagnostics.h"
 static void CTStartTrace(void) {
     // All trace state and polling live on the main queue. Hook filtering uses a lock.
     NSCAssert(NSThread.isMainThread,@"trace requires main queue");
     CTTraceDeadline = NSProcessInfo.processInfo.systemUptime + 60;
     @synchronized (CTWatched) { CTTracing = YES; }
     [CTLastStates removeAllObjects];
-    CTLog(@"TRACE_BEGIN version=0.1.3 duration=60s interval=250ms exists:0=absent,1=present,2=unknown; ppid is NOT proof of launch requester");
+    CTSceneTraceBegin();
+    CTLog(@"TRACE_BEGIN version=0.1.4 duration=60s interval=250ms exists:0=absent,1=present,2=unknown; ppid is NOT proof of launch requester");
     if (CTTraceTimer) return;
     CTTraceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
     dispatch_source_set_timer(CTTraceTimer,DISPATCH_TIME_NOW,250*NSEC_PER_MSEC,50*NSEC_PER_MSEC);
@@ -107,7 +109,7 @@ static void CTDiagnosticsInit(void) {
     CTLogQueue = dispatch_queue_create("com.sushibta.cleanta.log",DISPATCH_QUEUE_SERIAL);
     CTWatched = [NSMutableSet setWithArray:@[@"com.google.Maps",@"vn.vietmap.live"]];
     CTLastStates = [NSMutableDictionary new];
-    CTLog(@"INIT version=0.1.3 bundle=%@ iOS=%@",NSBundle.mainBundle.bundleIdentifier,UIDevice.currentDevice.systemVersion);
+    CTLog(@"INIT version=0.1.4 bundle=%@ iOS=%@",NSBundle.mainBundle.bundleIdentifier,UIDevice.currentDevice.systemVersion);
     // Runtime ABI validation: skip unknown signatures rather than guessing a private API.
     Class cls = NSClassFromString(@"FBSSystemService");
     SEL selector = NSSelectorFromString(@"openApplication:options:withResult:");

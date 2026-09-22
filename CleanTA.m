@@ -24,7 +24,7 @@ static NSString *CTSampleText(uint64_t value) {
     int pid = (int32_t)(value >> 32);
     unsigned current = (value >> 2) & 3;
     if (pid == 0) return (value & 3) == 0 ? @"không thấy tiến trình" : @"API=0, PID cũ còn/chưa rõ";
-    if (pid < 0) return @"API chưa trả được PID";
+    if (pid < 0) return (value & 3) == 0 ? @"PID cũ đã mất; API không trả PID hiện tại" : @"API chưa trả được PID";
     return [NSString stringWithFormat:@"PID %d (%@)",pid,current == 0 ? @"đã mất" : current == 1 ? @"còn" : @"chưa rõ"];
 }
 static id CTGet(id object, NSString *name) {
@@ -167,7 +167,7 @@ static CTController *controller;
     UIButton *reload = [self button:@"Làm mới" action:@selector(reloadApps)]; reload.tag = 2;
     [self.panel addSubview:back]; [self.panel addSubview:reload];
     UIButton *trace = [self button:@"Log 60s" action:@selector(startTrace)]; trace.tag = 4; [self.panel addSubview:trace];
-    UILabel *title = [UILabel new]; title.text = @"CleanTA 0.1.3"; title.textAlignment = NSTextAlignmentCenter;
+    UILabel *title = [UILabel new]; title.text = @"CleanTA 0.1.4"; title.textAlignment = NSTextAlignmentCenter;
     title.textColor = UIColor.whiteColor; title.font = [UIFont boldSystemFontOfSize:20]; title.tag = 3; [self.panel addSubview:title];
     self.status = [UILabel new]; self.status.font = [UIFont systemFontOfSize:14];
     self.status.textColor = UIColor.lightGrayColor; self.status.numberOfLines = 3; self.status.textAlignment = NSTextAlignmentCenter;
@@ -284,14 +284,20 @@ static CTController *controller;
     if (sampleTokens[0] >= 0 && notify_get_state(sampleTokens[0],&first) != NOTIFY_STATUS_OK) first = 0;
     if (sampleTokens[1] >= 0 && notify_get_state(sampleTokens[1],&last) != NOTIFY_STATUS_OK) last = 0;
     int original = [self.closingRow[@"pid"] intValue];
-    BOOL restarted = (last & 16) && ((last >> 2) & 3) == 1 && (int32_t)(last >> 32) > 1 && (int32_t)(last >> 32) != original;
-    NSString *outcome = (result & 3) == 1 ? @"Đã dừng tại giây 3" : restarted ? @"Có tiến trình mới" : @"Chưa xác nhận đã dừng";
+    int evidence = CTOutcome(last,original);
+    NSString *outcome = evidence == CTOutcomeStopped ? @"Đã dừng tại giây 3" :
+        evidence == CTOutcomeNewProcess ? @"Có tiến trình mới" :
+        evidence == CTOutcomeOldExited ? @"PID cũ đã đóng; chưa rõ tiến trình mới" : @"Chưa xác nhận đã dừng";
     self.status.text = [NSString stringWithFormat:@"%@ • trước: %d • %@\n1s: %@ | 3s: %@",self.closingRow[@"name"],original,outcome,CTSampleText(first),CTSampleText(last)];
-    if ((result & 3) == 1) {
-        self.rows = [self.rows filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *row,NSDictionary *bindings) {
-            return CTKey([row[@"bundle"] UTF8String],[row[@"pid"] intValue]) != key;
-        }]]; [self.table reloadData];
+    NSMutableArray *updated = [NSMutableArray new];
+    for (NSDictionary *row in self.rows) {
+        if (CTKey([row[@"bundle"] UTF8String],[row[@"pid"] intValue]) != key) { [updated addObject:row]; continue; }
+        if (evidence == CTOutcomeStopped || evidence == CTOutcomeOldExited) continue;
+        if (evidence == CTOutcomeNewProcess) {
+            NSMutableDictionary *fresh = [row mutableCopy]; fresh[@"pid"] = @((int32_t)(last >> 32)); [updated addObject:fresh];
+        } else [updated addObject:row];
     }
+    self.rows = updated; [self.table reloadData];
 }
 @end
 

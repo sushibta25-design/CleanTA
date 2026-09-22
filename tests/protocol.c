@@ -1,6 +1,13 @@
 #include "../CTProtocol.h"
 #include <assert.h>
 int main(void) {
+    assert(CTOutcome(0,42)==CTOutcomeUnknown);
+    assert(CTOutcome(CTMakeSample(-1,0,2),42)==CTOutcomeOldExited);
+    assert(CTOutcome(CTMakeSample(-1,2,2),42)==CTOutcomeUnknown);
+    assert(CTOutcome(CTMakeSample(43,0,1),42)==CTOutcomeNewProcess);
+    assert(CTOutcome(CTMakeSample(42,1,1),42)==CTOutcomeUnknown);
+    assert(CTOutcome(CTMakeSample(0,0,2),42)==CTOutcomeStopped);
+
     assert(CTSampleStopped(CTMakeSample(0,0,2)));
     assert(CTSampleStopped(CTMakeSample(42,0,0))); // stale API PID, absent in kernel
     assert(!CTSampleStopped(CTMakeSample(0,1,2))); // API says zero, old PID exists
