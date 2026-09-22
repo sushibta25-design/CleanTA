@@ -1,6 +1,13 @@
 #include "../CTProtocol.h"
 #include <assert.h>
 int main(void) {
+    assert(CTSampleStopped(CTMakeSample(0,0,2)));
+    assert(CTSampleStopped(CTMakeSample(42,0,0))); // stale API PID, absent in kernel
+    assert(!CTSampleStopped(CTMakeSample(0,1,2))); // API says zero, old PID exists
+    assert(!CTSampleStopped(CTMakeSample(43,0,1))); // restarted with new PID
+    assert(!CTSampleStopped(CTMakeSample(-1,0,2))); // failed lookup is not success
+    assert(!CTSampleStopped(CTMakeSample(42,2,2))); // permission/lookup ambiguity
+    assert(!CTSampleStopped(0)); // missing sample
     int pids[] = {2,42,65535,2147483647};
     for (unsigned i=0;i<sizeof(pids)/sizeof(*pids);i++) {
         uint64_t key=CTKey("com.example.player",pids[i]);

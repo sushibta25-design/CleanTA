@@ -1,12 +1,12 @@
-# CleanTA 0.1.1 — bản thử Dopamine rootless
+# CleanTA 0.1.2 — bản thử Dopamine rootless
 
-Nút **CT** trên CarPlay mở bảng ứng dụng đang có tiến trình. Có thể kéo nút CT đến vị trí khác. Chọn ứng dụng → **Đóng ứng dụng**. CleanTA yêu cầu SpringBoard kết thúc ứng dụng, chờ một giây rồi kiểm tra lại trước khi báo đã dừng.
+Nút **CT** trên CarPlay mở bảng ứng dụng đang có tiến trình. Có thể kéo nút CT đến vị trí khác. Chọn ứng dụng → **Đóng ứng dụng**. CleanTA yêu cầu SpringBoard kết thúc ứng dụng, kiểm tra ở giây 1 và 3 trước khi báo kết quả.
 
 Đây là tweak, chưa phải ứng dụng có icon riêng trên lưới CarPlay. Mục tiêu kiểm thử: iOS 15–16, Dopamine rootless. Chưa xác minh trên thiết bị thật. Không dành cho iPhone chưa jailbreak hoặc bản roothide.
 
 ## Cài thử
 
-GitHub → Actions → Build CleanTA rootless → lần chạy xanh → tải artifact `CleanTA-0.1.1-rootless`, giải nén, cài `.deb` bằng Sileo/Filza rồi respring. Kết nối lại CarPlay nếu nút CT chưa xuất hiện.
+GitHub → Actions → Build CleanTA rootless → lần chạy xanh → tải artifact `CleanTA-0.1.2-rootless`, giải nén, cài `.deb` bằng Sileo/Filza rồi respring. Kết nối lại CarPlay nếu nút CT chưa xuất hiện.
 
 1. Mở VML và bật tiếng, về Home CarPlay.
 2. Bấm CT → chọn VML → Đóng ứng dụng.
@@ -21,7 +21,7 @@ Nếu danh sách trống dù VML đang chạy, chụp dòng trạng thái cùng 
 - Chỉ ứng dụng loại User cùng Apple Maps, Music và Podcasts. Không cho đóng SpringBoard, CarPlayApp hay daemon hệ thống.
 - Đóng ứng dụng trên cả iPhone và CarPlay, không chỉ ẩn cửa sổ. Không xoá dữ liệu app hoặc cache; không respring/userspace reboot.
 - Không tự đóng hàng loạt; không ngăn iOS/tweak khác mở lại ứng dụng. Thẻ app switcher có thể còn; giao diện MultiTA có thể cần chọn lại app đã đóng.
-- Không có timer lặp, GPS, mạng, log file hoặc hook cảm ứng toàn hệ thống. Chỉ đọc danh sách theo yêu cầu; có một lần kiểm tra và một timeout cho mỗi lệnh đóng.
+- Không có timer lặp, GPS, mạng, log file hoặc hook cảm ứng toàn hệ thống. Chỉ đọc danh sách theo yêu cầu; có hai lần kiểm tra và một timeout cho mỗi lệnh đóng.
 
 ## Kỹ thuật và giới hạn
 
@@ -34,3 +34,9 @@ Build: `THEOS=/path/to/theos make package FINALPACKAGE=1` với iOS SDK 16.5. CI
 ## Sửa trong 0.1.1
 
 Cửa sổ phủ gắn trực tiếp vào UIScreen CarPlay, không gắn vào UIWindowScene đầu tiên (có thể là dock). Kích thước lấy từ screen.coordinateSpace, cập nhật khi mở bảng/đổi mode màn hình. Giao diện nền tối với màu chữ và nút xác định rõ. Ngắt màn hình sẽ giải phóng overlay, kết nối lại tạo mới. Cần kiểm tra thực tế toàn màn và thao tác đóng VML; cơ chế đóng ứng dụng giữ nguyên.
+
+## Kiểm tra trong 0.1.2
+
+Giữ nguyên cơ chế gửi lệnh đóng. Hiện tên ứng dụng, PID trước lệnh và kết quả tại giây 1/3. SpringBoard đối chiếu PID do FrontBoard trả về với `kill(pid, 0)` (chỉ thăm dò tồn tại, không gửi tín hiệu đóng). Nếu API còn trả PID cũ nhưng kernel báo ESRCH, có thể xác nhận tiến trình cũ đã mất. EPERM được xem là còn tồn tại, không phải đã đóng; lỗi đọc không được báo thành công. PID mới còn tồn tại được ghi “Có tiến trình mới”. Không có vòng lặp buộc tắt app.
+
+Ảnh Google Maps còn trên MultiTA không đủ để kết luận app đang chạy: có thể là nội dung được giữ lại hoặc app đã được mở lại. CleanTA chưa gỡ scene của MultiTA. Sau khi đóng, chụp dòng tên/PID/1s/3s, đừng bấm Làm mới trước khi chụp vì nút đó thay dòng trạng thái. Kiểm tra chỉ phản ánh hai thời điểm, không ngăn mở lại sau đó. Kernel probe PID không xác minh thời điểm tạo process; tái sử dụng PID có thể dẫn tới báo chưa đóng (không tự gửi tín hiệu tới PID đó).
