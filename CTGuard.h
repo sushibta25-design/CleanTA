@@ -1,4 +1,5 @@
-// CTGuard (0.1.6) — chỉ chạy trong CarPlayApp.
+#import <dlfcn.h>
+// CTGuard (0.1.9) — chỉ chạy trong CarPlayApp.
 // Log 0.1.5: sau khi kill, DashBoard vẫn giữ scene <bundle>:dashboard và
 // <bundle>:widget, tiếp tục updateSettings rồi foreground lại -> FrontBoard
 // spawn process mới (~100ms). Guard này:
@@ -9,7 +10,7 @@
 
 static NSMutableDictionary<NSString *, NSNumber *> *CTSuppressUntil;
 static NSMutableSet<NSString *> *CTGuardHooks;
-static const NSTimeInterval CTSuppressSeconds = 15;
+static const NSTimeInterval CTSuppressSeconds = 20;
 // 0.1.7: log 0.1.6 cho thấy FBSceneManager.scenes không liệt kê được (total=0)
 // dù các scene Car[..]:<bundle>:dashboard/widget vẫn tồn tại. Vì vậy tự ghi nhận
 // mọi FBScene đi qua hook updateSettings/createScene (giá trị weak).
@@ -37,6 +38,30 @@ static void CTDumpSceneAPI(void) {
         free(ivars);
         CTLog(@"API %@ methods=%@ ivars=%@",name,hits,names);
     }
+    // 0.1.9: tìm lớp DashBoard xử lý "death of process" / "nav identifier".
+    Dl_info info = {0};
+    Class anchor = NSClassFromString(@"DBApplicationSceneViewController");
+    if (anchor && dladdr((__bridge void *)anchor,&info) && info.dli_fname) {
+        unsigned classCount = 0;
+        const char **names = objc_copyClassNamesForImage(info.dli_fname,&classCount);
+        NSUInteger logged = 0;
+        for (unsigned c = 0; c < classCount && logged < 80; c++) {
+            Class cls = objc_getClass(names[c]); if (!cls) continue;
+            unsigned count = 0; Method *list = class_copyMethodList(cls,&count);
+            NSMutableArray *hits = [NSMutableArray new];
+            for (unsigned i = 0; i < count; i++) {
+                NSString *sel = NSStringFromSelector(method_getName(list[i]));
+                NSString *low = sel.lowercaseString;
+                if ([low containsString:@"death"] || [low containsString:@"died"] || [low containsString:@"navigationidentifier"] ||
+                    [low containsString:@"navidentifier"] || [low containsString:@"navigationowner"] || [low containsString:@"currentnav"] ||
+                    [low containsString:@"processdidexit"] || [low containsString:@"relaunch"]) [hits addObject:sel];
+            }
+            free(list);
+            if (hits.count) { CTLog(@"API_DB %s %@",names[c],hits); logged++; }
+        }
+        free(names);
+        CTLog(@"API_DB scanned image=%s classes=%u",info.dli_fname,classCount);
+    } else CTLog(@"API_DB DashBoard image not found");
 }
 
 static BOOL CTIDMatches(NSString *identifier, NSString *bundle) {
@@ -187,9 +212,67 @@ static void CTInstallGuard(void) {
         }
     }
 }
+// 0.1.9: log hệ thống cho thấy sau khi VML chết, DashBoard ("Current nav identifier
+// is: vn.vietmap.live") tạo lại + ACTIVATE scene :widget/:dashboard gửi sang
+// CarPlayTemplateUIHost, và CarPlayTemplateUIHost bootstrap lại VML. Đường tạo scene
+// không qua createSceneWithDefinition, nên chặn ở bước FBScene activate*.
+static NSString *CTBlockedScene(id scene, NSString *entry) {
+    NSString *identifier = nil;
+    @try { identifier = CTReadObject(scene,@"identifier"); } @catch (__unused NSException *e) {}
+    NSString *hit = CTSuppressedMatch(identifier);
+    if (hit) CTLog(@"BLOCK %@ bundle=%@ scene=%@",entry,hit,identifier);
+    return hit;
+}
+static void CTFinishBlocks(NSArray *args, NSIndexSet *blockIndexes) {
+    [blockIndexes enumerateIndexesUsingBlock:^(NSUInteger i, BOOL *stop) {
+        id b = i < args.count ? args[i] : nil;
+        if (b && b != (id)NSNull.null) ((void(^)(id))b)(nil);
+    }];
+}
+static void CTHookActivation(NSString *className, NSArray<NSString *> *prefixes) {
+    Class cls = NSClassFromString(className);
+    if (!cls) { CTLog(@"GUARD activate class absent %@",className); return; }
+    unsigned count = 0; Method *list = class_copyMethodList(cls,&count);
+    for (unsigned i = 0; i < count; i++) {
+        SEL sel = method_getName(list[i]);
+        NSString *selName = NSStringFromSelector(sel);
+        BOOL match = NO;
+        for (NSString *p in prefixes) if ([selName hasPrefix:p]) { match = YES; break; }
+        if (!match) continue;
+        NSString *key = [NSString stringWithFormat:@"activate %@ %@",className,selName];
+        if ([CTGuardHooks containsObject:key]) continue;
+        unsigned argc = method_getNumberOfArguments(list[i]) - 2;
+        char type[128] = {0}; method_getReturnType(list[i],type,sizeof(type));
+        BOOL ok = type[0] == 'v' && argc <= 3;
+        NSMutableIndexSet *blocks = [NSMutableIndexSet new];
+        for (unsigned a = 0; ok && a < argc; a++) {
+            method_getArgumentType(list[i],a+2,type,sizeof(type));
+            if (type[0] != '@') ok = NO; else if (type[1] == '?') [blocks addIndex:a];
+        }
+        if (!ok) { CTLog(@"GUARD activate skip %@ (ABI)",key); continue; }
+        __block IMP original = NULL; IMP replacement = NULL;
+        NSString *entry = selName;
+        if (argc == 0) replacement = imp_implementationWithBlock(^(id o) {
+            if (CTBlockedScene(o,entry)) return;
+            ((void(*)(id,SEL))original)(o,sel); });
+        else if (argc == 1) replacement = imp_implementationWithBlock(^(id o,id a) {
+            if (CTBlockedScene(o,entry)) { CTFinishBlocks(@[a ?: NSNull.null],blocks); return; }
+            ((void(*)(id,SEL,id))original)(o,sel,a); });
+        else if (argc == 2) replacement = imp_implementationWithBlock(^(id o,id a,id b) {
+            if (CTBlockedScene(o,entry)) { CTFinishBlocks(@[a ?: NSNull.null,b ?: NSNull.null],blocks); return; }
+            ((void(*)(id,SEL,id,id))original)(o,sel,a,b); });
+        else replacement = imp_implementationWithBlock(^(id o,id a,id b,id c) {
+            if (CTBlockedScene(o,entry)) { CTFinishBlocks(@[a ?: NSNull.null,b ?: NSNull.null,c ?: NSNull.null],blocks); return; }
+            ((void(*)(id,SEL,id,id,id))original)(o,sel,a,b,c); });
+        MSHookMessageEx(cls,sel,replacement,&original);
+        [CTGuardHooks addObject:key]; CTLog(@"GUARD installed %@",key);
+    }
+    free(list);
+}
 // Gọi ngay trước khi gửi lệnh kill.
 static void CTGuardPrepare(NSString *bundle) {
     CTInstallGuard();
+    CTHookActivation(@"FBScene",@[@"activate",@"_activate"]);
     CTSuppress(bundle);
     CTDestroyScenes(bundle);
 }
@@ -197,4 +280,5 @@ static void CTGuardInit(void) {
     CTSuppressUntil = [NSMutableDictionary new];
     CTSeenScenes = [NSMapTable strongToWeakObjectsMapTable];
     CTInstallGuard();
+    CTHookActivation(@"FBScene",@[@"activate",@"_activate"]);
 }
