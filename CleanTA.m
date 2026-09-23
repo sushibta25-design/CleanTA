@@ -236,7 +236,7 @@ static CTController *controller;
     UIButton *reload = [self button:@"Làm mới" action:@selector(reloadApps)]; reload.tag = 2;
     [self.panel addSubview:back]; [self.panel addSubview:reload];
     UIButton *trace = [self button:@"Log 60s" action:@selector(startTrace)]; trace.tag = 4; [self.panel addSubview:trace];
-    UILabel *title = [UILabel new]; title.text = @"CleanTA 0.1.6"; title.textAlignment = NSTextAlignmentCenter;
+    UILabel *title = [UILabel new]; title.text = @"CleanTA 0.1.8"; title.textAlignment = NSTextAlignmentCenter;
     title.textColor = UIColor.whiteColor; title.font = [UIFont boldSystemFontOfSize:20]; title.tag = 3; [self.panel addSubview:title];
     self.status = [UILabel new]; self.status.font = [UIFont systemFontOfSize:14];
     self.status.textColor = UIColor.lightGrayColor; self.status.numberOfLines = 3; self.status.textAlignment = NSTextAlignmentCenter;
@@ -273,7 +273,7 @@ static CTController *controller;
 - (void)startTrace {
     CTStartTrace();
     notify_post("com.sushibta.cleanta.trace.v1");
-    self.status.text = @"Đang ghi log 60 giây. Thử đóng app một lần. Log: Library/Logs/CleanTA.";
+    self.status.text = @"Đang ghi log 60s (kèm system.log). Đợi 3 giây rồi đóng VML một lần.";
 }
 - (void)reloadApps {
     if (self.pending || self.loading) return;
