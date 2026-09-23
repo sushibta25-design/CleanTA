@@ -10,6 +10,34 @@
 static NSMutableDictionary<NSString *, NSNumber *> *CTSuppressUntil;
 static NSMutableSet<NSString *> *CTGuardHooks;
 static const NSTimeInterval CTSuppressSeconds = 15;
+// 0.1.7: log 0.1.6 cho thấy FBSceneManager.scenes không liệt kê được (total=0)
+// dù các scene Car[..]:<bundle>:dashboard/widget vẫn tồn tại. Vì vậy tự ghi nhận
+// mọi FBScene đi qua hook updateSettings/createScene (giá trị weak).
+static NSMapTable<NSString *, id> *CTSeenScenes;
+static void CTNoteScene(id scene) {
+    NSString *identifier = CTReadObject(scene,@"identifier");
+    if (![identifier isKindOfClass:NSString.class] || !CTSeenScenes) return;
+    @synchronized (CTSeenScenes) { [CTSeenScenes setObject:scene forKey:identifier]; }
+}
+static void CTDumpSceneAPI(void) {
+    static BOOL done; if (done) return; done = YES;
+    for (NSString *name in @[@"FBSceneManager",@"FBScene"]) {
+        Class cls = NSClassFromString(name); if (!cls) { CTLog(@"API %@ absent",name); continue; }
+        unsigned count = 0; Method *list = class_copyMethodList(cls,&count);
+        NSMutableArray *hits = [NSMutableArray new];
+        for (unsigned i = 0; i < count; i++) {
+            NSString *sel = NSStringFromSelector(method_getName(list[i]));
+            NSString *low = sel.lowercaseString;
+            if ([low containsString:@"destroy"] || [low containsString:@"invalidat"] || [low containsString:@"deactivat"] || [low containsString:@"scenes"] || [low containsString:@"scenewith"]) [hits addObject:sel];
+        }
+        free(list);
+        unsigned ivarCount = 0; Ivar *ivars = class_copyIvarList(cls,&ivarCount);
+        NSMutableArray *names = [NSMutableArray new];
+        for (unsigned i = 0; i < ivarCount; i++) { const char *n = ivar_getName(ivars[i]); if (n && strstr(n,"cene")) [names addObject:@(n)]; }
+        free(ivars);
+        CTLog(@"API %@ methods=%@ ivars=%@",name,hits,names);
+    }
+}
 
 static BOOL CTIDMatches(NSString *identifier, NSString *bundle) {
     if (![identifier isKindOfClass:NSString.class] || !bundle.length) return NO;
@@ -36,27 +64,46 @@ static NSArray *CTAllScenes(void) {
     if (!manager) return @[];
     id scenes = nil;
     for (NSString *name in @[@"scenes",@"allScenes"]) { scenes = CTReadObject(manager,name); if (scenes) break; }
-    if (!scenes) { @try { scenes = [[manager valueForKey:@"_scenesByID"] allValues]; } @catch (__unused NSException *e) {} }
+    for (NSString *key in @[@"_scenesByID",@"_scenesByIdentifier",@"_scenes"]) {
+        if (scenes) break;
+        @try { scenes = [manager valueForKey:key]; } @catch (__unused NSException *e) {}
+    }
     if ([scenes isKindOfClass:NSSet.class]) return [scenes allObjects];
     if ([scenes isKindOfClass:NSArray.class]) return scenes;
     if ([scenes isKindOfClass:NSDictionary.class]) return [scenes allValues];
     return @[];
 }
 static NSUInteger CTDestroyScenes(NSString *bundle) {
+    CTDumpSceneAPI();
     id manager = CTReadObject(NSClassFromString(@"FBSceneManager"),@"sharedInstance");
-    SEL destroy = NSSelectorFromString(@"destroyScene:withTransitionContext:");
-    NSMutableArray *ids = [NSMutableArray new];
-    for (id scene in CTAllScenes()) {
+    NSMutableDictionary<NSString *, id> *targets = [NSMutableDictionary new];
+    NSArray *listed = CTAllScenes();
+    for (id scene in listed) {
         NSString *identifier = CTReadObject(scene,@"identifier");
-        if (CTIDMatches(identifier,bundle)) [ids addObject:identifier];
+        if (CTIDMatches(identifier,bundle)) targets[identifier] = scene;
     }
-    CTLog(@"SCENES_MATCH bundle=%@ count=%lu ids=%@ total=%lu",bundle,(unsigned long)ids.count,ids,(unsigned long)CTAllScenes().count);
-    if (![manager respondsToSelector:destroy]) { CTLog(@"DESTROY unavailable"); return 0; }
+    NSUInteger seen = 0;
+    @synchronized (CTSeenScenes) {
+        seen = CTSeenScenes.count;
+        for (NSString *identifier in CTSeenScenes.keyEnumerator.allObjects) {
+            id scene = [CTSeenScenes objectForKey:identifier];
+            if (scene && CTIDMatches(identifier,bundle)) targets[identifier] = scene;
+        }
+    }
+    CTLog(@"SCENES_MATCH bundle=%@ count=%lu ids=%@ listed=%lu seen=%lu",bundle,(unsigned long)targets.count,targets.allKeys,(unsigned long)listed.count,(unsigned long)seen);
+    SEL destroy = NSSelectorFromString(@"destroyScene:withTransitionContext:");
+    SEL invalidate = NSSelectorFromString(@"invalidate");
     NSUInteger done = 0;
-    for (NSString *identifier in ids) {
+    for (NSString *identifier in targets) {
+        id scene = targets[identifier];
         @try {
-            ((void(*)(id,SEL,id,id))objc_msgSend)(manager,destroy,identifier,nil);
-            done++; CTLog(@"DESTROY scene=%@",identifier);
+            if ([manager respondsToSelector:destroy]) {
+                ((void(*)(id,SEL,id,id))objc_msgSend)(manager,destroy,identifier,nil);
+                done++; CTLog(@"DESTROY manager scene=%@",identifier);
+            } else if ([scene respondsToSelector:invalidate]) {
+                ((void(*)(id,SEL))objc_msgSend)(scene,invalidate);
+                done++; CTLog(@"DESTROY invalidate scene=%@",identifier);
+            } else CTLog(@"DESTROY unavailable scene=%@",identifier);
         } @catch (NSException *e) { CTLog(@"DESTROY exception=%@ scene=%@",e.name,identifier); }
     }
     return done;
@@ -105,6 +152,7 @@ static void CTInstallGuard(void) {
             if (CTHookCompatible(cls,sel,3,'v')) {
                 __block IMP original = NULL;
                 IMP replacement = imp_implementationWithBlock(^(id object,id settings,id context,id completion) {
+                    @try { CTNoteScene(object); } @catch (__unused NSException *e) {}
                     NSString *hit = nil;
                     @try { hit = CTSuppressedMatch(CTReadObject(object,@"identifier")); } @catch (__unused NSException *e) {}
                     if (hit) { CTLog(@"BLOCK updateSettings bundle=%@ scene=%@",hit,CTReadObject(object,@"identifier")); CTFinish(completion); return; }
@@ -129,7 +177,9 @@ static void CTInstallGuard(void) {
                         NSString *hit = CTSuppressedMatch(identifier);
                         if (hit) CTLog(@"CREATE_DURING_SUPPRESS bundle=%@ scene=%@ stack=%@",hit,identifier,NSThread.callStackSymbols);
                     } @catch (__unused NSException *e) {}
-                    return ((id(*)(id,SEL,id,id))original)(object,sel,definition,parameters);
+                    id scene = ((id(*)(id,SEL,id,id))original)(object,sel,definition,parameters);
+                    @try { CTNoteScene(scene); } @catch (__unused NSException *e) {}
+                    return scene;
                 });
                 MSHookMessageEx(cls,sel,replacement,&original);
                 [CTGuardHooks addObject:name]; CTLog(@"GUARD installed create(log-only)");
@@ -145,5 +195,6 @@ static void CTGuardPrepare(NSString *bundle) {
 }
 static void CTGuardInit(void) {
     CTSuppressUntil = [NSMutableDictionary new];
+    CTSeenScenes = [NSMapTable strongToWeakObjectsMapTable];
     CTInstallGuard();
 }
