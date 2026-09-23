@@ -7,6 +7,7 @@
 #import <errno.h>
 #import "CTProtocol.h"
 #import "CTDiagnostics.h"
+#import "CTGuard.h"
 
 static const char *CTRequest = "com.sushibta.cleanta.close.v1";
 static const char *CTReply = "com.sushibta.cleanta.result.v1";
@@ -202,6 +203,7 @@ static void CTHandleRequest(void) {
 @property(nonatomic,assign) NSUInteger generation;
 @property(nonatomic,assign) BOOL loading;
 @property(nonatomic,copy) NSDictionary *closingRow;
+@property(nonatomic,assign) NSUInteger retries;
 - (void)receiveResult:(uint64_t)result;
 @end
 static CTWindow *overlay;
@@ -234,7 +236,7 @@ static CTController *controller;
     UIButton *reload = [self button:@"Làm mới" action:@selector(reloadApps)]; reload.tag = 2;
     [self.panel addSubview:back]; [self.panel addSubview:reload];
     UIButton *trace = [self button:@"Log 60s" action:@selector(startTrace)]; trace.tag = 4; [self.panel addSubview:trace];
-    UILabel *title = [UILabel new]; title.text = @"CleanTA 0.1.5"; title.textAlignment = NSTextAlignmentCenter;
+    UILabel *title = [UILabel new]; title.text = @"CleanTA 0.1.6"; title.textAlignment = NSTextAlignmentCenter;
     title.textColor = UIColor.whiteColor; title.font = [UIFont boldSystemFontOfSize:20]; title.tag = 3; [self.panel addSubview:title];
     self.status = [UILabel new]; self.status.font = [UIFont systemFontOfSize:14];
     self.status.textColor = UIColor.lightGrayColor; self.status.numberOfLines = 3; self.status.textAlignment = NSTextAlignmentCenter;
@@ -323,17 +325,26 @@ static CTController *controller;
     [alert addAction:[UIAlertAction actionWithTitle:@"Đóng ứng dụng" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) { [self closeApp:row]; }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
-- (void)closeApp:(NSDictionary *)row {
+- (void)closeApp:(NSDictionary *)row { self.retries = 0; [self sendClose:row]; }
+- (void)sendClose:(NSDictionary *)row {
     if (requestToken < 0 || replyToken < 0) { self.status.text = @"Không kết nối được CleanTA. Thử respring."; return; }
     uint64_t key = CTKey([row[@"bundle"] UTF8String],[row[@"pid"] intValue]);
+    if (!key) { self.status.text = @"PID không hợp lệ. Bấm Làm mới."; return; }
     CTWatch(row[@"bundle"]);
-    CTLog(@"UI_CLOSE key=%llu bundle=%@ listedPID=%@",(unsigned long long)key,row[@"bundle"],row[@"pid"]);
+    CTLog(@"UI_CLOSE key=%llu bundle=%@ listedPID=%@ retry=%lu",(unsigned long long)key,row[@"bundle"],row[@"pid"],(unsigned long)self.retries);
     self.closingRow = row; self.pending = key; NSUInteger generation = ++self.generation;
-    self.status.text = [NSString stringWithFormat:@"%@: PID %@ — kiểm tra ở giây 1 và 3…",row[@"name"],row[@"pid"]];
-    if (notify_set_state(requestToken,key) != NOTIFY_STATUS_OK || notify_post(CTRequest) != NOTIFY_STATUS_OK) {
-        self.pending = 0; self.status.text = @"Không gửi được yêu cầu đóng."; return;
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,6*NSEC_PER_SEC),dispatch_get_main_queue(), ^{
+    self.status.text = self.retries ?
+        [NSString stringWithFormat:@"%@: bị mở lại, thử lại %lu/2 (PID %@)…",row[@"name"],(unsigned long)self.retries,row[@"pid"]] :
+        [NSString stringWithFormat:@"%@: PID %@ — gỡ scene CarPlay rồi đóng…",row[@"name"],row[@"pid"]];
+    // Gỡ scene dashboard/widget/app trên màn xe và bật chặn relaunch TRƯỚC khi kill.
+    @try { CTGuardPrepare(row[@"bundle"]); } @catch (NSException *e) { CTLog(@"GUARD exception=%@",e.name); }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,350*NSEC_PER_MSEC),dispatch_get_main_queue(), ^{
+        if (self.pending != key || self.generation != generation) return;
+        if (notify_set_state(requestToken,key) != NOTIFY_STATUS_OK || notify_post(CTRequest) != NOTIFY_STATUS_OK) {
+            self.pending = 0; self.status.text = @"Không gửi được yêu cầu đóng.";
+        }
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,7*NSEC_PER_SEC),dispatch_get_main_queue(), ^{
         if (self.pending == key && self.generation == generation) {
             self.pending = 0; self.status.text = @"Chưa nhận được phản hồi. Bấm Làm mới để kiểm tra.";
         }
@@ -352,10 +363,22 @@ static CTController *controller;
     if (sampleTokens[1] >= 0 && notify_get_state(sampleTokens[1],&last) != NOTIFY_STATUS_OK) last = 0;
     int original = [self.closingRow[@"pid"] intValue];
     int evidence = CTOutcome(last,original);
+    if (evidence == CTOutcomeNewProcess && self.retries < 2) {
+        // DashBoard đã kéo app dậy: cập nhật PID mới, gỡ scene lần nữa, gửi lại.
+        NSMutableDictionary *fresh = [self.closingRow mutableCopy]; fresh[@"pid"] = @((int32_t)(last >> 32));
+        NSMutableArray *updated = [NSMutableArray new];
+        for (NSDictionary *row in self.rows) [updated addObject:[row[@"bundle"] isEqual:fresh[@"bundle"]] ? fresh : row];
+        self.rows = updated; [self.table reloadData];
+        self.retries++;
+        CTLog(@"RETRY bundle=%@ newPID=%@ attempt=%lu",fresh[@"bundle"],fresh[@"pid"],(unsigned long)self.retries);
+        [self sendClose:fresh];
+        return;
+    }
     NSString *outcome = evidence == CTOutcomeStopped ? @"Đã dừng tại giây 3" :
         evidence == CTOutcomeNewProcess ? @"Có tiến trình mới" :
         evidence == CTOutcomeOldExited ? @"PID cũ đã đóng; chưa rõ tiến trình mới" : @"Chưa xác nhận đã dừng";
-    self.status.text = [NSString stringWithFormat:@"%@ • trước: %d • %@\n1s: %@ | 3s: %@",self.closingRow[@"name"],original,outcome,CTSampleText(first),CTSampleText(last)];
+    NSString *tries = self.retries ? [NSString stringWithFormat:@" • đã thử lại %lu",(unsigned long)self.retries] : @"";
+    self.status.text = [NSString stringWithFormat:@"%@ • trước: %d • %@%@\n1s: %@ | 3s: %@",self.closingRow[@"name"],original,outcome,tries,CTSampleText(first),CTSampleText(last)];
     NSMutableArray *updated = [NSMutableArray new];
     for (NSDictionary *row in self.rows) {
         if (CTKey([row[@"bundle"] UTF8String],[row[@"pid"] intValue]) != key) { [updated addObject:row]; continue; }
@@ -414,6 +437,7 @@ __attribute__((constructor)) static void CTInit(void) {
                 uint64_t result = 0; if (notify_get_state(token,&result) == NOTIFY_STATUS_OK) [controller receiveResult:result];
             }) != NOTIFY_STATUS_OK) replyToken = -1;
             dispatch_async(dispatch_get_main_queue(), ^{
+                CTGuardInit();
                 NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
                 [nc addObserverForName:UIWindowDidBecomeVisibleNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { CTAttach(n.object); }];
                 [nc addObserverForName:UIScreenDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {

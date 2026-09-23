@@ -66,7 +66,7 @@ static void CTStartTrace(void) {
     @synchronized (CTWatched) { CTTracing = YES; }
     [CTLastStates removeAllObjects];
     CTSceneTraceBegin();
-    CTLog(@"TRACE_BEGIN version=0.1.4 duration=60s interval=250ms exists:0=absent,1=present,2=unknown; ppid is NOT proof of launch requester");
+    CTLog(@"TRACE_BEGIN version=0.1.6 duration=60s interval=250ms exists:0=absent,1=present,2=unknown; ppid is NOT proof of launch requester");
     if (CTTraceTimer) return;
     CTTraceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
     dispatch_source_set_timer(CTTraceTimer,DISPATCH_TIME_NOW,250*NSEC_PER_MSEC,50*NSEC_PER_MSEC);
@@ -109,7 +109,7 @@ static void CTDiagnosticsInit(void) {
     CTLogQueue = dispatch_queue_create("com.sushibta.cleanta.log",DISPATCH_QUEUE_SERIAL);
     CTWatched = [NSMutableSet setWithArray:@[@"com.google.Maps",@"vn.vietmap.live"]];
     CTLastStates = [NSMutableDictionary new];
-    CTLog(@"INIT version=0.1.4 bundle=%@ iOS=%@",NSBundle.mainBundle.bundleIdentifier,UIDevice.currentDevice.systemVersion);
+    CTLog(@"INIT version=0.1.6 bundle=%@ iOS=%@",NSBundle.mainBundle.bundleIdentifier,UIDevice.currentDevice.systemVersion);
     // Runtime ABI validation: skip unknown signatures rather than guessing a private API.
     Class cls = NSClassFromString(@"FBSSystemService");
     SEL selector = NSSelectorFromString(@"openApplication:options:withResult:");
