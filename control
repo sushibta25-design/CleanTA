@@ -1,6 +1,6 @@
 Package: com.sushibta.cleanta
 Name: CleanTA
-Version: 0.2.0
+Version: 1.0.0
 Architecture: iphoneos-arm64
 Description: Đóng ứng dụng đang chạy từ màn hình CarPlay. iOS 15-16 rootless.
 Maintainer: sushibta

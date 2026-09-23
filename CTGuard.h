@@ -59,7 +59,7 @@ static NSUInteger CTDestroyScenes(NSString *bundle) {
             } else if ([targets[identifier] respondsToSelector:invalidate]) {
                 ((void(*)(id,SEL))objc_msgSend)(targets[identifier],invalidate); done++;
             }
-        } @catch (NSException *e) { CTLog(@"DESTROY exception=%@ scene=%@",e.name,identifier); }
+        } @catch (__unused NSException *e) {}
     }
     return done;
 }
@@ -165,8 +165,7 @@ static void CTInstallGuard(void) {
 static void CTGuardPrepare(NSString *bundle) {
     CTInstallGuard();
     CTSuppress(bundle);
-    NSUInteger n = CTDestroyScenes(bundle);
-    CTLog(@"GUARD bundle=%@ destroyedScenes=%lu",bundle,(unsigned long)n);
+    CTDestroyScenes(bundle);
 }
 static void CTGuardInit(void) {
     CTSuppressUntil = [NSMutableDictionary new];

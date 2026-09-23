@@ -1,4 +1,4 @@
-// CleanTA 0.2.0 — đóng app đang chạy từ màn hình CarPlay.
+// CleanTA 1.0.0 — đóng app đang chạy từ màn hình CarPlay.
 // SpringBoard: server kết thúc app qua RunningBoard.
 // CarPlayApp : giao diện + chặn CarPlay tự mở lại app dẫn đường.
 #import <UIKit/UIKit.h>
@@ -70,7 +70,7 @@ static int CTPid(NSString *bundle) {
     return ((int(*)(id,SEL,id))objc_msgSend)(service,sel,bundle);
 }
 // Kết thúc qua RunningBoard (SpringBoard có entitlement terminateprocess).
-static BOOL CTTerminate(NSString *bundle, NSString **why) {
+static BOOL CTTerminate(NSString *bundle) {
     Class ctxCls = NSClassFromString(@"RBSTerminateContext"), reqCls = NSClassFromString(@"RBSTerminateRequest");
     Class predCls = NSClassFromString(@"RBSProcessPredicate");
     SEL ctxSel = NSSelectorFromString(@"defaultContextWithExplanation:");
@@ -78,7 +78,7 @@ static BOOL CTTerminate(NSString *bundle, NSString **why) {
     SEL initSel = NSSelectorFromString(@"initWithPredicate:context:");
     SEL execSel = NSSelectorFromString(@"execute:");
     if (![ctxCls respondsToSelector:ctxSel] || ![predCls respondsToSelector:predSel] || ![reqCls instancesRespondToSelector:initSel]) {
-        if (why) *why = @"RBS missing"; return NO;
+        return NO;
     }
     id ctx = ((id(*)(id,SEL,id))objc_msgSend)(ctxCls,ctxSel,@"CleanTA: user requested close");
     @try {
@@ -88,11 +88,26 @@ static BOOL CTTerminate(NSString *bundle, NSString **why) {
     } @catch (__unused NSException *e) {}
     id pred = ((id(*)(id,SEL,id))objc_msgSend)(predCls,predSel,bundle);
     id req = ((id(*)(id,SEL,id,id))objc_msgSend)([reqCls alloc],initSel,pred,ctx);
-    if (![req respondsToSelector:execSel]) { if (why) *why = @"execute missing"; return NO; }
+    if (![req respondsToSelector:execSel]) return NO;
     NSError *err = nil;
-    BOOL ok = ((BOOL(*)(id,SEL,NSError **))objc_msgSend)(req,execSel,&err);
-    if (why) *why = err ? err.localizedDescription : (ok ? @"ok" : @"failed");
-    return ok;
+    return ((BOOL(*)(id,SEL,NSError **))objc_msgSend)(req,execSel,&err);
+}
+// Icon app (API riêng của UIKit), thu về 44pt bo góc. Không có thì dùng biểu tượng mặc định.
+static UIImage *CTAppIcon(NSString *bundle) {
+    UIImage *icon = nil;
+    SEL sel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+    if ([UIImage respondsToSelector:sel]) {
+        @try { icon = ((UIImage *(*)(id,SEL,id,int,CGFloat))objc_msgSend)(UIImage.class,sel,bundle,2,(CGFloat)3.0); }
+        @catch (__unused NSException *e) {}
+    }
+    if (!icon) icon = [UIImage systemImageNamed:@"app.fill"];
+    if (!icon) return nil;
+    CGSize size = CGSizeMake(44,44);
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0,0,44,44) cornerRadius:10] addClip];
+        [icon drawInRect:CGRectMake(0,0,44,44)];
+    }];
 }
 static NSArray *CTProxies(void) {
     id ws = CTGet(NSClassFromString(@"LSApplicationWorkspace"), @"defaultWorkspace");
@@ -130,17 +145,14 @@ static void CTHandleRequest(void) {
                 target = bundle;
             }
         }
-        if (!target) { CTLog(@"REJECT stale key"); CTRespond(key,3); return; }
+        if (!target) { CTRespond(key,3); return; }
         serverBusy = YES;
-        NSString *why = nil;
-        BOOL ok = CTTerminate(target,&why);
-        if (!ok) {
+        if (!CTTerminate(target)) {
             id service = CTService();
             SEL terminate = NSSelectorFromString(@"terminateApplication:forReason:andReport:withDescription:");
             if ([service respondsToSelector:terminate])
                 ((void(*)(id,SEL,id,long long,BOOL,id))objc_msgSend)(service,terminate,target,1,NO,@"CleanTA: user requested close");
         }
-        CTLog(@"TERMINATE bundle=%@ ok=%d detail=%@",target,ok,why);
         int original = (uint32_t)(key >> 2);
         for (int i = 0; i < 2; ++i) {
             if (sampleTokens[i] >= 0) notify_set_state(sampleTokens[i],0);
@@ -156,13 +168,12 @@ static void CTHandleRequest(void) {
                 if (slot == 1) { CTRespond(key,result); serverBusy = NO; }
             });
         }
-    } @catch (NSException *e) { serverBusy = NO; CTLog(@"REQUEST exception=%@",e.name); CTRespond(key,3); }
+    } @catch (__unused NSException *e) { serverBusy = NO; CTRespond(key,3); }
 }
 
 #pragma mark - Giao diện (CarPlayApp)
 
 @interface CTWindow : UIWindow
-@property(nonatomic,weak) UIView *entry;
 @property(nonatomic,assign) BOOL expanded;
 - (void)refreshGeometry;
 @end
@@ -178,15 +189,15 @@ static void CTHandleRequest(void) {
     CGRect full = self.screen.coordinateSpace.bounds;
     if (!CGRectIsEmpty(full) && !CGRectIsInfinite(full) && !CGRectEqualToRect(self.frame,full)) self.frame = full;
 }
-// Khi bảng đóng, chỉ nút CT nhận chạm; phần còn lại xuyên qua CarPlay.
+// Khi bảng đóng, mọi thao tác chạm xuyên qua CarPlay.
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)event {
-    if (!self.expanded && (self.entry.hidden || ![self.entry pointInside:[self.entry convertPoint:p fromView:self] withEvent:event])) return nil;
+    if (!self.expanded) return nil;
     return [super hitTest:p withEvent:event];
 }
 @end
 
 @interface CTController : UIViewController <UITableViewDataSource,UITableViewDelegate>
-@property(nonatomic,strong) UIButton *entry, *doneButton, *closeAllButton;
+@property(nonatomic,strong) UIButton *doneButton, *closeAllButton;
 @property(nonatomic,strong) UIView *panel;
 @property(nonatomic,strong) UILabel *titleLabel, *status;
 @property(nonatomic,strong) UITableView *table;
@@ -221,13 +232,6 @@ static CTController *controller;
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
     self.rows = @[]; self.queue = [NSMutableArray new];
-    // Nút nổi dự phòng: giữ lại cho tới khi icon CleanTA trên Home CarPlay chạy ổn.
-    self.entry = [self button:@"CT" action:@selector(openPanel)];
-    self.entry.backgroundColor = [UIColor colorWithRed:0.10 green:0.62 blue:0.72 alpha:0.95];
-    self.entry.layer.cornerRadius = 20;
-    [self.entry addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)]];
-    [self.view addSubview:self.entry];
-
     self.panel = [UIView new];
     self.panel.backgroundColor = [UIColor colorWithWhite:0.07 alpha:1];
     self.panel.hidden = YES;
@@ -248,7 +252,7 @@ static CTController *controller;
     self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.table.backgroundColor = self.panel.backgroundColor;
     self.table.separatorColor = [UIColor colorWithWhite:0.25 alpha:1];
-    self.table.rowHeight = 64;
+    self.table.rowHeight = 68;
     self.table.delegate = self; self.table.dataSource = self;
     UIRefreshControl *refresh = [UIRefreshControl new];
     refresh.tintColor = UIColor.lightGrayColor;
@@ -259,11 +263,6 @@ static CTController *controller;
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect bounds = self.view.bounds, safe = CGRectInset(bounds,10,8);
-    if (CGRectIsEmpty(self.entry.frame)) self.entry.frame = CGRectMake(CGRectGetMidX(safe)-22,CGRectGetMinY(safe)+6,44,44);
-    CGPoint c = self.entry.center;
-    c.x = MAX(CGRectGetMinX(safe)+22,MIN(c.x,CGRectGetMaxX(safe)-22));
-    c.y = MAX(CGRectGetMinY(safe)+22,MIN(c.y,CGRectGetMaxY(safe)-22));
-    self.entry.center = c;
     self.panel.frame = bounds;
     CGFloat x = CGRectGetMinX(safe), y = CGRectGetMinY(safe), w = CGRectGetWidth(safe);
     self.doneButton.frame = CGRectMake(x,y,96,46);
@@ -271,12 +270,6 @@ static CTController *controller;
     self.titleLabel.frame = CGRectMake(x+104,y,MAX(0,w-262),46);
     self.status.frame = CGRectMake(x+8,y+50,w-16,40);
     self.table.frame = CGRectMake(x,y+94,w,MAX(0,CGRectGetHeight(safe)-94));
-}
-- (void)drag:(UIPanGestureRecognizer *)g {
-    CGPoint d = [g translationInView:self.view];
-    self.entry.center = CGPointMake(self.entry.center.x+d.x,self.entry.center.y+d.y);
-    [g setTranslation:CGPointZero inView:self.view];
-    [self.view setNeedsLayout];
 }
 - (BOOL)busy { return self.pending || self.closingRow || self.queue.count; }
 - (void)updateButtons {
@@ -329,7 +322,10 @@ static CTController *controller;
                 int pid = CTPid(bundle);
                 if (pid <= 1 || CTExists(pid) == 0) continue;
                 NSString *name = CTGet(proxy,@"localizedName");
-                [rows addObject:@{@"bundle":bundle,@"pid":@(pid),@"name":name ?: bundle}];
+                NSMutableDictionary *row = [@{@"bundle":bundle,@"pid":@(pid),@"name":name ?: bundle} mutableCopy];
+                UIImage *icon = CTAppIcon(bundle);
+                if (icon) row[@"icon"] = icon;
+                [rows addObject:row];
             }
             [rows sortUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) {
                 return [a[@"name"] localizedCaseInsensitiveCompare:b[@"name"]];
@@ -356,6 +352,7 @@ static CTController *controller;
     cell.detailTextLabel.textColor = UIColor.lightGrayColor;
     NSDictionary *row = self.rows[index.row];
     cell.textLabel.text = row[@"name"];
+    cell.imageView.image = row[@"icon"];
     BOOL closing = [self.closingRow[@"bundle"] isEqual:row[@"bundle"]];
     BOOL queued = NO;
     for (NSDictionary *q in self.queue) if ([q[@"bundle"] isEqual:row[@"bundle"]]) { queued = YES; break; }
@@ -427,7 +424,7 @@ static CTController *controller;
     self.pending = key;
     NSUInteger generation = ++self.generation;
     // Gỡ scene CarPlay và bật chặn tự mở lại TRƯỚC khi kill.
-    @try { CTGuardPrepare(row[@"bundle"]); } @catch (NSException *e) { CTLog(@"GUARD exception=%@",e.name); }
+    @try { CTGuardPrepare(row[@"bundle"]); } @catch (__unused NSException *e) {}
     // Server chỉ xử lý một lệnh một lúc; chờ nếu vừa gửi lệnh đóng app CleanTA.
     NSTimeInterval wait = MAX(0.35, 3.6 - (NSProcessInfo.processInfo.systemUptime - self.stubKillAt));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(wait*NSEC_PER_SEC)),dispatch_get_main_queue(), ^{
@@ -452,7 +449,6 @@ static CTController *controller;
         NSMutableDictionary *fresh = [self.closingRow mutableCopy];
         fresh[@"pid"] = @((int32_t)(last >> 32));
         self.retries++;
-        CTLog(@"RETRY bundle=%@ attempt=%lu",fresh[@"bundle"],(unsigned long)self.retries);
         [self sendClose:fresh];
         return;
     }
@@ -461,7 +457,6 @@ static CTController *controller;
 - (void)finishCurrent:(BOOL)closed {
     NSDictionary *row = self.closingRow;
     if (row) {
-        CTLog(@"RESULT bundle=%@ closed=%d retries=%lu",row[@"bundle"],closed,(unsigned long)self.retries);
         if (closed) {
             self.queueDone++;
             NSMutableArray *updated = [NSMutableArray new];
@@ -481,11 +476,11 @@ static void CTShowPanel(void) {
 }
 // Icon CleanTA trên CarPlay được mở (qua hook scene hoặc thông báo từ app).
 static void CTStubActivated(NSString *source) {
+    (void)source;
     static NSTimeInterval last;
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     if (now - last < 1.5 || now < CTStubMuteUntil) return;
     last = now;
-    CTLog(@"STUB activated via %@",source);
     dispatch_async(dispatch_get_main_queue(), ^{ CTShowPanel(); });
 }
 
@@ -509,7 +504,6 @@ static void CTAttach(UIWindow *host) {
     overlay.windowLevel = UIWindowLevelAlert + 100;
     overlay.rootViewController = controller;
     [controller loadViewIfNeeded];
-    overlay.entry = controller.entry;
     [overlay refreshGeometry];
     overlay.hidden = NO;
 }
@@ -519,7 +513,6 @@ __attribute__((constructor)) static void CTInit(void) {
         NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
         BOOL springboard = [bundle isEqual:@"com.apple.springboard"], carplay = [bundle isEqual:@"com.apple.CarPlayApp"];
         if (!springboard && !carplay) return;
-        CTLogInit();
         dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",RTLD_LAZY);
         dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices",RTLD_LAZY);
         dlopen("/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices",RTLD_LAZY);
