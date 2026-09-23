@@ -1,1 +1,6 @@
-
+#!/bin/sh
+# Đăng ký icon app CleanTA với hệ thống.
+if command -v uicache >/dev/null 2>&1; then
+    uicache -p /var/jb/Applications/CleanTAApp.app >/dev/null 2>&1 || true
+fi
+exit 0
