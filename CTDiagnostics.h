@@ -3,6 +3,9 @@
 #import <substrate.h>
 #import <sys/sysctl.h>
 #import <sys/stat.h>
+#import <spawn.h>
+#import <sys/wait.h>
+extern char **environ;
 
 static int CTPid(NSString *bundle);
 static unsigned CTExists(int pid);
@@ -59,6 +62,36 @@ static NSString *CTProcess(int pid) {
     return [NSString stringWithFormat:@"pid=%d exists=%u sysctl=%d errno=%d bytes=%lu",pid,exists,result,result ? saved : 0,(unsigned long)length];
 }
 #import "CTSceneDiagnostics.h"
+// 0.1.8: ghi system log (runningboardd) 60s bằng oslog, không cần gõ lệnh.
+// Chỉ chạy trong SpringBoard, khi bấm Log 60s. Cần gói "oslog" từ Procursus.
+static NSTimeInterval CTSyslogUntil;
+static NSString *CTFirstExisting(NSArray<NSString *> *paths) {
+    for (NSString *p in paths) if ([NSFileManager.defaultManager isExecutableFileAtPath:p]) return p;
+    return nil;
+}
+static void CTCaptureSystemLog(void) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.springboard"]) return;
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    if (now < CTSyslogUntil) return;
+    NSString *sh = CTFirstExisting(@[@"/var/jb/bin/sh",@"/var/jb/usr/bin/sh",@"/var/jb/bin/bash",@"/var/jb/usr/bin/bash"]);
+    NSString *oslog = CTFirstExisting(@[@"/var/jb/usr/bin/oslog",@"/var/jb/usr/local/bin/oslog"]);
+    NSString *timeout = CTFirstExisting(@[@"/var/jb/usr/bin/timeout",@"/var/jb/bin/timeout"]);
+    NSString *grep = CTFirstExisting(@[@"/var/jb/usr/bin/grep",@"/var/jb/bin/grep"]);
+    if (!sh || !oslog || !timeout || !grep) {
+        CTLog(@"SYSLOG unavailable sh=%@ oslog=%@ timeout=%@ grep=%@ (cài gói oslog trong Sileo)",sh,oslog,timeout,grep);
+        return;
+    }
+    CTSyslogUntil = now + 62;
+    NSString *out = @"/var/mobile/Library/Logs/CleanTA/system.log";
+    NSString *cmd = [NSString stringWithFormat:
+        @"echo \"=== capture start ===\" >> %@; %@ 60 %@ 2>&1 | %@ --line-buffered -i -E 'vietmap|launch request|executing launch|RBLaunch|runningboardd.*launch' >> %@; echo \"=== capture end ===\" >> %@",
+        out,timeout,oslog,grep,out,out];
+    pid_t child = 0;
+    const char *argv[] = {sh.UTF8String,"-c",cmd.UTF8String,NULL};
+    int rc = posix_spawn(&child,sh.UTF8String,NULL,NULL,(char *const *)argv,environ);
+    CTLog(@"SYSLOG spawn rc=%d pid=%d file=%@",rc,child,out);
+    if (rc == 0) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{ int st = 0; waitpid(child,&st,0); CTLog(@"SYSLOG finished status=%d",st); });
+}
 static void CTStartTrace(void) {
     // All trace state and polling live on the main queue. Hook filtering uses a lock.
     NSCAssert(NSThread.isMainThread,@"trace requires main queue");
@@ -66,7 +99,8 @@ static void CTStartTrace(void) {
     @synchronized (CTWatched) { CTTracing = YES; }
     [CTLastStates removeAllObjects];
     CTSceneTraceBegin();
-    CTLog(@"TRACE_BEGIN version=0.1.6 duration=60s interval=250ms exists:0=absent,1=present,2=unknown; ppid is NOT proof of launch requester");
+    CTCaptureSystemLog();
+    CTLog(@"TRACE_BEGIN version=0.1.8 duration=60s interval=250ms exists:0=absent,1=present,2=unknown; ppid is NOT proof of launch requester");
     if (CTTraceTimer) return;
     CTTraceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
     dispatch_source_set_timer(CTTraceTimer,DISPATCH_TIME_NOW,250*NSEC_PER_MSEC,50*NSEC_PER_MSEC);
@@ -109,7 +143,7 @@ static void CTDiagnosticsInit(void) {
     CTLogQueue = dispatch_queue_create("com.sushibta.cleanta.log",DISPATCH_QUEUE_SERIAL);
     CTWatched = [NSMutableSet setWithArray:@[@"com.google.Maps",@"vn.vietmap.live"]];
     CTLastStates = [NSMutableDictionary new];
-    CTLog(@"INIT version=0.1.6 bundle=%@ iOS=%@",NSBundle.mainBundle.bundleIdentifier,UIDevice.currentDevice.systemVersion);
+    CTLog(@"INIT version=0.1.8 bundle=%@ iOS=%@",NSBundle.mainBundle.bundleIdentifier,UIDevice.currentDevice.systemVersion);
     // Runtime ABI validation: skip unknown signatures rather than guessing a private API.
     Class cls = NSClassFromString(@"FBSSystemService");
     SEL selector = NSSelectorFromString(@"openApplication:options:withResult:");
