@@ -32,10 +32,70 @@ static id CTGet(id object, NSString *name) {
     return [object respondsToSelector:sel] ? ((id(*)(id,SEL))objc_msgSend)(object,sel) : nil;
 }
 static id CTService(void) { return CTGet(NSClassFromString(@"FBSSystemService"), @"sharedService"); }
+static BOOL CTInSpringBoard(void) {
+    static BOOL value; static dispatch_once_t once;
+    dispatch_once(&once, ^{ value = [NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.springboard"]; });
+    return value;
+}
+// SpringBoard: đọc PID trong tiến trình (SBApplicationController) hoặc hỏi
+// runningboardd. KHÔNG gọi client FBSSystemService từ SpringBoard: đó là XPC
+// gửi ngược vào chính server của nó trên main queue -> timeout, trả -1.
+static int CTServerPid(NSString *bundle) {
+    id controller = CTGet(NSClassFromString(@"SBApplicationController"), @"sharedInstance");
+    SEL appSel = NSSelectorFromString(@"applicationWithBundleIdentifier:");
+    if ([controller respondsToSelector:appSel]) {
+        id app = ((id(*)(id,SEL,id))objc_msgSend)(controller,appSel,bundle);
+        id state = CTGet(app,@"processState");
+        SEL pidSel = NSSelectorFromString(@"pid");
+        if ([state respondsToSelector:pidSel]) {
+            int pid = ((int(*)(id,SEL))objc_msgSend)(state,pidSel);
+            if (pid > 1) return pid;
+        }
+    }
+    Class predCls = NSClassFromString(@"RBSProcessPredicate"), handleCls = NSClassFromString(@"RBSProcessHandle");
+    SEL predSel = NSSelectorFromString(@"predicateMatchingBundleIdentifier:");
+    SEL handleSel = NSSelectorFromString(@"handleForPredicate:error:");
+    if (![predCls respondsToSelector:predSel] || ![handleCls respondsToSelector:handleSel]) return 0;
+    id pred = ((id(*)(id,SEL,id))objc_msgSend)(predCls,predSel,bundle);
+    NSError *err = nil;
+    id handle = ((id(*)(id,SEL,id,NSError **))objc_msgSend)(handleCls,handleSel,pred,&err);
+    for (NSString *name in @[@"rbs_pid", @"pid"]) {
+        SEL sel = NSSelectorFromString(name);
+        if ([handle respondsToSelector:sel]) { int pid = ((int(*)(id,SEL))objc_msgSend)(handle,sel); return pid > 1 ? pid : 0; }
+    }
+    return 0;
+}
 static int CTPid(NSString *bundle) {
+    if (CTInSpringBoard()) return CTServerPid(bundle);
     id service = CTService(); SEL sel = NSSelectorFromString(@"pidForApplication:");
     if (![service respondsToSelector:sel]) return -1;
     return ((int(*)(id,SEL,id))objc_msgSend)(service,sel,bundle);
+}
+// Kết thúc qua RunningBoard (iOS 14+). SpringBoard có entitlement
+// com.apple.runningboard.terminateprocess. Trả YES nếu request chạy không lỗi.
+static BOOL CTTerminate(NSString *bundle, NSString **why) {
+    Class ctxCls = NSClassFromString(@"RBSTerminateContext"), reqCls = NSClassFromString(@"RBSTerminateRequest");
+    Class predCls = NSClassFromString(@"RBSProcessPredicate");
+    SEL ctxSel = NSSelectorFromString(@"defaultContextWithExplanation:");
+    SEL predSel = NSSelectorFromString(@"predicateMatchingBundleIdentifier:");
+    SEL initSel = NSSelectorFromString(@"initWithPredicate:context:");
+    SEL execSel = NSSelectorFromString(@"execute:");
+    if (![ctxCls respondsToSelector:ctxSel] || ![predCls respondsToSelector:predSel] || ![reqCls instancesRespondToSelector:initSel]) {
+        if (why) *why = @"RBS classes missing"; return NO;
+    }
+    id ctx = ((id(*)(id,SEL,id))objc_msgSend)(ctxCls,ctxSel,@"CleanTA: user requested close");
+    @try {
+        [ctx setValue:@0 forKey:@"reportType"];
+        [ctx setValue:@(0xbaadca11ULL) forKey:@"exceptionCode"];
+        [ctx setValue:@40 forKey:@"maximumTerminationResistance"]; // mức UserInteractive: vượt qua audio/nav đang chạy
+    } @catch (NSException *e) { CTLog(@"RBS context KVC exception=%@",e.name); }
+    id pred = ((id(*)(id,SEL,id))objc_msgSend)(predCls,predSel,bundle);
+    id req = ((id(*)(id,SEL,id,id))objc_msgSend)([reqCls alloc],initSel,pred,ctx);
+    if (![req respondsToSelector:execSel]) { if (why) *why = @"execute: missing"; return NO; }
+    NSError *err = nil;
+    BOOL ok = ((BOOL(*)(id,SEL,NSError **))objc_msgSend)(req,execSel,&err);
+    if (why) *why = err ? err.description : (ok ? @"ok" : @"NO without error");
+    return ok;
 }
 static NSArray *CTProxies(void) {
     id ws = CTGet(NSClassFromString(@"LSApplicationWorkspace"), @"defaultWorkspace");
@@ -72,14 +132,21 @@ static void CTHandleRequest(void) {
             }
         }
         if (!target) { CTLog(@"REJECT stale PID, disallowed target or missing proxy"); CTRespond(key,3); return; }
-        id service = CTService();
-        SEL terminate = NSSelectorFromString(@"terminateApplication:forReason:andReport:withDescription:");
-        if (![service respondsToSelector:terminate]) { CTRespond(key,3); return; }
         CTWatch(target);
-        CTLog(@"TERMINATE key=%llu bundle=%@ reason=1 report=NO before=%@",(unsigned long long)key,target,CTProcess(CTPid(target)));
+        CTLog(@"TERMINATE key=%llu bundle=%@ via=RBS before=%@",(unsigned long long)key,target,CTProcess(CTPid(target)));
         serverBusy = YES;
-        ((void(*)(id,SEL,id,long long,BOOL,id))objc_msgSend)(service,terminate,target,1,NO,@"CleanTA: user requested close");
-        CTLog(@"TERMINATE returned bundle=%@",target);
+        NSString *why = nil;
+        BOOL ok = CTTerminate(target,&why);
+        CTLog(@"TERMINATE returned bundle=%@ ok=%d detail=%@",target,ok,why);
+        if (!ok) {
+            // Dự phòng: đường cũ qua FBSSystemService.
+            id service = CTService();
+            SEL terminate = NSSelectorFromString(@"terminateApplication:forReason:andReport:withDescription:");
+            if ([service respondsToSelector:terminate]) {
+                ((void(*)(id,SEL,id,long long,BOOL,id))objc_msgSend)(service,terminate,target,1,NO,@"CleanTA: user requested close");
+                CTLog(@"TERMINATE fallback FBSSystemService sent");
+            }
+        }
         int original = (uint32_t)(key >> 2);
         for (int i = 0; i < 2; ++i) {
             if (sampleTokens[i] >= 0) notify_set_state(sampleTokens[i],0);
@@ -167,7 +234,7 @@ static CTController *controller;
     UIButton *reload = [self button:@"Làm mới" action:@selector(reloadApps)]; reload.tag = 2;
     [self.panel addSubview:back]; [self.panel addSubview:reload];
     UIButton *trace = [self button:@"Log 60s" action:@selector(startTrace)]; trace.tag = 4; [self.panel addSubview:trace];
-    UILabel *title = [UILabel new]; title.text = @"CleanTA 0.1.4"; title.textAlignment = NSTextAlignmentCenter;
+    UILabel *title = [UILabel new]; title.text = @"CleanTA 0.1.5"; title.textAlignment = NSTextAlignmentCenter;
     title.textColor = UIColor.whiteColor; title.font = [UIFont boldSystemFontOfSize:20]; title.tag = 3; [self.panel addSubview:title];
     self.status = [UILabel new]; self.status.font = [UIFont systemFontOfSize:14];
     self.status.textColor = UIColor.lightGrayColor; self.status.numberOfLines = 3; self.status.textAlignment = NSTextAlignmentCenter;
@@ -329,6 +396,7 @@ __attribute__((constructor)) static void CTInit(void) {
     @autoreleasepool {
         dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",RTLD_LAZY);
         dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices",RTLD_LAZY);
+        dlopen("/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices",RTLD_LAZY);
         NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
         CTDiagnosticsInit();
         if ([bundle isEqual:@"com.apple.springboard"] || [bundle isEqual:@"com.apple.CarPlayApp"]) {
