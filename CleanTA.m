@@ -14,6 +14,7 @@
 static const char *CTRequest = "com.sushibta.cleanta.close.v1";
 static const char *CTReply = "com.sushibta.cleanta.result.v1";
 static const char *CTShowNote = "com.sushibta.cleanta.show.v1";
+static const char *CTShowAck = "com.sushibta.cleanta.show.ack.v1";
 static int requestToken = -1, replyToken = -1, showToken = -1;
 static int sampleTokens[2] = {-1,-1};
 static BOOL serverBusy;
@@ -479,6 +480,7 @@ static void CTShowPanel(void) {
     }
     pendingShowPanel = NO;
     [controller openPanel];
+    notify_post(CTShowAck);
 }
 
 // CarBridge can request a CleanTA launch through SpringBoard without waking the
