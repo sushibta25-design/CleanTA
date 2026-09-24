@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Test process identity protocol
         run: clang -std=c11 -Wall -Wextra -Werror tests/protocol.c -o /tmp/cleanta-test && /tmp/cleanta-test
       - name: Install dependencies
@@ -30,7 +30,7 @@ jobs:
         run: chmod 0755 layout/DEBIAN/postinst
       - name: Build
         run: gmake clean package FINALPACKAGE=1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: CleanTA-0.2.0-rootless
           path: packages/*.deb
