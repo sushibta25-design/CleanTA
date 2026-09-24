@@ -480,6 +480,44 @@ static void CTShowPanel(void) {
     pendingShowPanel = NO;
     [controller openPanel];
 }
+
+// CarBridge can request a CleanTA launch through SpringBoard without waking the
+// app's iPhone scene. Observe that launch in SpringBoard and notify CarPlay directly.
+static IMP CTOriginalOpenApplication;
+static void CTPostCarPlayShowHint(void) {
+    notify_post(CTShowNote);
+    for (NSNumber *delay in @[@0.35, @0.9, @1.6, @2.4]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            notify_post(CTShowNote);
+        });
+    }
+}
+static void CTOpenApplication(id object, SEL selector, id bundle, id options, id completion) {
+    BOOL cleanTA = [bundle isKindOfClass:NSString.class] && [bundle isEqualToString:CTStubBundle];
+    ((void(*)(id,SEL,id,id,id))CTOriginalOpenApplication)(object,selector,bundle,options,completion);
+    if (cleanTA) CTPostCarPlayShowHint();
+}
+static void CTInstallLaunchObserver(void) {
+    Class cls = NSClassFromString(@"FBSSystemService");
+    SEL selector = NSSelectorFromString(@"openApplication:options:withResult:");
+    Method method = class_getInstanceMethod(cls,selector);
+    BOOL compatible = method && method_getNumberOfArguments(method) == 5;
+    char type[64] = {0};
+    if (compatible) {
+        method_getReturnType(method,type,sizeof(type));
+        compatible = type[0] == 'v';
+        for (unsigned i = 2; i < 5 && compatible; ++i) {
+            method_getArgumentType(method,i,type,sizeof(type));
+            compatible = type[0] == '@';
+        }
+    }
+    if (compatible) {
+        MSHookMessageEx(cls,selector,(IMP)CTOpenApplication,&CTOriginalOpenApplication);
+    } else {
+        NSLog(@"[CleanTA] SpringBoard launch observer unavailable or ABI mismatch");
+    }
+}
 // Icon CleanTA trên CarPlay được mở (qua hook scene hoặc thông báo từ app).
 static void CTStubActivated(NSString *source) {
     (void)source;
@@ -531,6 +569,7 @@ __attribute__((constructor)) static void CTInit(void) {
         if (springboard) {
             if (notify_register_check(CTReply,&replyToken) != NOTIFY_STATUS_OK) replyToken = -1;
             if (notify_register_dispatch(CTRequest,&requestToken,dispatch_get_main_queue(),^(int token) { CTHandleRequest(); }) != NOTIFY_STATUS_OK) requestToken = -1;
+            CTInstallLaunchObserver();
             return;
         }
         if (notify_register_check(CTRequest,&requestToken) != NOTIFY_STATUS_OK) requestToken = -1;
