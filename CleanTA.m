@@ -214,6 +214,8 @@ static void CTHandleRequest(void) {
 @end
 static CTWindow *overlay;
 static CTController *controller;
+static BOOL pendingShowPanel;
+static void CTShowPanel(void);
 
 @implementation CTController
 - (UIButton *)button:(NSString *)title action:(SEL)action {
@@ -471,7 +473,11 @@ static CTController *controller;
 @end
 
 static void CTShowPanel(void) {
-    if (!overlay || !controller) return;
+    if (!overlay || !controller || !overlay.screen) {
+        pendingShowPanel = YES;
+        return;
+    }
+    pendingShowPanel = NO;
     [controller openPanel];
 }
 // Icon CleanTA trên CarPlay được mở (qua hook scene hoặc thông báo từ app).
@@ -493,6 +499,7 @@ static void CTAttach(UIWindow *host) {
             overlay.hidden = YES; overlay.screen = screen;
             [overlay refreshGeometry]; overlay.hidden = NO;
         }
+        if (pendingShowPanel && overlay && controller) CTShowPanel();
         return;
     }
     controller = [CTController new];
@@ -506,6 +513,7 @@ static void CTAttach(UIWindow *host) {
     [controller loadViewIfNeeded];
     [overlay refreshGeometry];
     overlay.hidden = NO;
+    if (pendingShowPanel) CTShowPanel();
 }
 
 __attribute__((constructor)) static void CTInit(void) {

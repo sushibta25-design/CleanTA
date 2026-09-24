@@ -1,35 +1,28 @@
-// CleanTA.app — app nhỏ để có icon CleanTA trên Home CarPlay (qua tweak bridge).
-// Khi được mở, app báo cho tweak trong CarPlay hiện bảng CleanTA.
-// Bấm "Xong" trong bảng, tweak sẽ kết thúc app này để CarPlay về Home.
+// CleanTA launcher: CarPlay UI is hosted by the injected CleanTA tweak.
+// Do not create an iPhone UIWindow; only request the CarPlay panel.
 #import <UIKit/UIKit.h>
 #import <notify.h>
 
 @interface CTAppDelegate : UIResponder <UIApplicationDelegate>
-@property(nonatomic,strong) UIWindow *window;
+@property(nonatomic,assign) NSUInteger requestGeneration;
 @end
 
 @implementation CTAppDelegate
-- (void)requestPanel { notify_post("com.sushibta.cleanta.show.v1"); }
+- (void)requestPanel {
+    NSUInteger generation = ++self.requestGeneration;
+    notify_post("com.sushibta.cleanta.show.v1");
+    // CarBridge can start this launcher before the CarPlay tweak finishes attaching
+    // its overlay. Retry briefly so the request survives that startup race.
+    for (NSNumber *delay in @[@0.35, @0.8, @1.3, @1.9]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (generation != self.requestGeneration ||
+                UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
+            notify_post("com.sushibta.cleanta.show.v1");
+        });
+    }
+}
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
-    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    UIViewController *root = [UIViewController new];
-    root.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.33 blue:0.42 alpha:1];
-    UILabel *label = [UILabel new];
-    label.text = @"CleanTA\n\nMở trên màn hình CarPlay để đóng ứng dụng đang chạy.";
-    label.numberOfLines = 0;
-    label.textAlignment = NSTextAlignmentCenter;
-    label.textColor = UIColor.whiteColor;
-    label.font = [UIFont boldSystemFontOfSize:20];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    [root.view addSubview:label];
-    [NSLayoutConstraint activateConstraints:@[
-        [label.centerXAnchor constraintEqualToAnchor:root.view.centerXAnchor],
-        [label.centerYAnchor constraintEqualToAnchor:root.view.centerYAnchor],
-        [label.leadingAnchor constraintGreaterThanOrEqualToAnchor:root.view.leadingAnchor constant:24],
-        [label.trailingAnchor constraintLessThanOrEqualToAnchor:root.view.trailingAnchor constant:-24]
-    ]];
-    self.window.rootViewController = root;
-    [self.window makeKeyAndVisible];
     [self requestPanel];
     return YES;
 }
