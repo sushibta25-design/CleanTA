@@ -1,4 +1,4 @@
-name: Build CleanTA rootless
+name: Build CleanTA
 on:
   push:
     branches: [main]
@@ -11,15 +11,25 @@ concurrency:
 jobs:
   build:
     runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: rootless
+            theos: https://github.com/theos/theos.git
+            scheme: rootless
+          - variant: roothide
+            theos: https://github.com/roothide/theos.git
+            scheme: roothide
     steps:
       - uses: actions/checkout@v5
       - name: Test process identity protocol
         run: clang -std=c11 -Wall -Wextra -Werror tests/protocol.c -o /tmp/cleanta-test && /tmp/cleanta-test
       - name: Install dependencies
         run: brew install ldid xz make
-      - name: Install Theos
+      - name: Install Theos (${{ matrix.variant }})
         run: |
-          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          git clone --recursive ${{ matrix.theos }} "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
       - name: Install iOS SDK
         run: |
@@ -28,10 +38,10 @@ jobs:
           tar -xf /tmp/ios-sdk.tar.xz -C "$THEOS/sdks"
       - name: Prepare package scripts
         run: chmod 0755 layout/DEBIAN/postinst
-      - name: Build
-        run: gmake clean package FINALPACKAGE=1
+      - name: Build (${{ matrix.variant }})
+        run: gmake clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
       - uses: actions/upload-artifact@v6
         with:
-          name: CleanTA-0.1.0-rootless
+          name: CleanTA-0.1.0-${{ matrix.variant }}
           path: packages/*.deb
           if-no-files-found: error

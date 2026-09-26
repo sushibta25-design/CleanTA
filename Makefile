@@ -1,6 +1,6 @@
 ARCHS = arm64 arm64e
 TARGET = iphone:clang:16.5:15.0
-THEOS_PACKAGE_SCHEME = rootless
+THEOS_PACKAGE_SCHEME ?= rootless
 include $(THEOS)/makefiles/common.mk
 
 # Tweak: SpringBoard (server đóng app) + CarPlayApp (giao diện, chặn mở lại)
