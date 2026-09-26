@@ -1,34 +1,15 @@
-// CleanTA 1.0.0 — đóng app đang chạy từ màn hình CarPlay.
+// CleanTA 0.1 — đóng app đang chạy từ màn hình CarPlay.
 // SpringBoard: server kết thúc app qua RunningBoard.
 // CarPlayApp : giao diện + chặn CarPlay tự mở lại app dẫn đường.
 #import <UIKit/UIKit.h>
 #import <notify.h>
 #import <dlfcn.h>
 #import <unistd.h>
-#import <fcntl.h>
 #import <signal.h>
 #import <errno.h>
 #import "CTProtocol.h"
 #import "CTUtil.h"
 #import "CTGuard.h"
-
-// Panel diagnostics (1.0.3). CarPlayApp may write /var/mobile, so lines go
-// into MultiTA's log (one file for the user to send), tagged [CleanTA].
-static void CTPanelLog(NSString *format, ...) NS_FORMAT_FUNCTION(1,2);
-static void CTPanelLog(NSString *format, ...) {
-    va_list args; va_start(args,format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args]; va_end(args);
-    static dispatch_queue_t queue; static dispatch_once_t once;
-    dispatch_once(&once, ^{ queue = dispatch_queue_create("com.sushibta.cleanta.panellog", DISPATCH_QUEUE_SERIAL); });
-    NSDate *time = NSDate.date; NSString *process = NSBundle.mainBundle.bundleIdentifier ?: @"?";
-    dispatch_async(queue, ^{
-        @autoreleasepool {
-            NSData *data = [[NSString stringWithFormat:@"%@ [CleanTA 1.0.5] [%@] %@\n",time,process,message] dataUsingEncoding:NSUTF8StringEncoding];
-            int fd = open("/var/mobile/MultiTA-beta.log", O_WRONLY|O_CREAT|O_APPEND, 0644);
-            if (fd >= 0) { (void)write(fd,data.bytes,data.length); close(fd); }
-        }
-    });
-}
 
 static const char *CTRequest = "com.sushibta.cleanta.close.v1";
 static const char *CTReply = "com.sushibta.cleanta.result.v1";
@@ -153,7 +134,7 @@ static void CTRespond(uint64_t key, unsigned result) {
 static void CTHandleRequest(void) {
     uint64_t key = 0;
     if (notify_get_state(requestToken,&key) != NOTIFY_STATUS_OK || !CTValidKey(key)) return;
-    if (serverBusy) { CTPanelLog(@"SB request busy key=%llx", key); CTRespond(key,3); return; }
+    if (serverBusy) { CTRespond(key,3); return; }
     @try {
         NSString *target = nil;
         for (id proxy in CTProxies()) {
@@ -165,8 +146,7 @@ static void CTHandleRequest(void) {
                 target = bundle;
             }
         }
-        if (!target) { CTPanelLog(@"SB request no target key=%llx", key); CTRespond(key,3); return; }
-        CTPanelLog(@"SB close %@", target);
+        if (!target) { CTRespond(key,3); return; }
         serverBusy = YES;
         if (!CTTerminate(target)) {
             id service = CTService();
@@ -221,11 +201,11 @@ static void CTHandleRequest(void) {
 }
 @end
 
-@interface CTController : UIViewController <UITableViewDataSource,UITableViewDelegate>
-@property(nonatomic,strong) UIButton *doneButton, *closeAllButton;
-@property(nonatomic,strong) UIView *panel;
-@property(nonatomic,strong) UILabel *titleLabel, *status;
-@property(nonatomic,strong) UITableView *table;
+@interface CTController : UIViewController <UICollectionViewDataSource,UICollectionViewDelegate>
+@property(nonatomic,strong) UIVisualEffectView *panel;
+@property(nonatomic,strong) UILabel *titleLabel, *countLabel, *status;
+@property(nonatomic,strong) UIButton *closeButton, *closeAllButton;
+@property(nonatomic,strong) UICollectionView *collection;
 @property(nonatomic,copy) NSArray<NSDictionary *> *rows;
 @property(nonatomic,strong) NSMutableArray<NSDictionary *> *queue;
 @property(nonatomic,copy) NSDictionary *closingRow;
@@ -264,73 +244,170 @@ static BOOL CTGoHome(void) {
     }
     SEL tapped = NSSelectorFromString(@"_homeTapped:");
     if (dash && [dash respondsToSelector:tapped]) {
-        @try { ((void(*)(id,SEL,id))objc_msgSend)(dash,tapped,nil); CTPanelLog(@"HOME via _homeTapped:"); return YES; }
-        @catch (NSException *e) { CTPanelLog(@"HOME error %@", e.name); }
+        @try { ((void(*)(id,SEL,id))objc_msgSend)(dash,tapped,nil); return YES; }
+        @catch (NSException *e) { }
     }
-    CTPanelLog(@"HOME unavailable dashboard=%@", NSStringFromClass([dash class]));
     return NO;
 }
 
-@implementation CTController
-- (UIButton *)button:(NSString *)title action:(SEL)action {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    [b setTitle:title forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont boldSystemFontOfSize:18];
-    b.titleLabel.adjustsFontSizeToFitWidth = YES;
-    b.titleLabel.minimumScaleFactor = 0.75;
-    b.backgroundColor = [UIColor colorWithWhite:0.18 alpha:1];
-    b.tintColor = UIColor.whiteColor;
-    b.layer.cornerRadius = 12;
-    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return b;
+// Nhóm ứng dụng: chỉ để tô màu chip, không phải trạng thái phát/định vị trực tiếp.
+static NSString *CTKind(NSString *bundle) {
+    static NSSet *nav, *media; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        nav = [NSSet setWithArray:@[@"com.apple.Maps",@"com.google.Maps",@"vn.vietmap.live",@"com.banyac.midrive.intl"]];
+        media = [NSSet setWithArray:@[@"com.google.ios.youtube",@"com.google.ios.youtubemusic",@"com.netflix.Netflix",@"com.apple.Music",@"com.apple.podcasts",@"com.apple.tv",@"com.spotify.client",@"com.soundcloud.TouchApp"]];
+    });
+    if ([nav containsObject:bundle]) return @"nav";
+    if ([media containsObject:bundle]) return @"media";
+    return @"run";
 }
+@interface CTAppCell : UICollectionViewCell
+@property(nonatomic,strong) UIImageView *icon;
+@property(nonatomic,strong) UILabel *name, *chip, *closeMark;
+- (void)configure:(NSDictionary *)row closing:(BOOL)closing queued:(BOOL)queued;
+@end
+@implementation CTAppCell
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        UIView *c = self.contentView;
+        c.backgroundColor = [UIColor colorWithWhite:1 alpha:0.055];
+        c.layer.cornerRadius = 15; c.layer.cornerCurve = kCACornerCurveContinuous;
+        c.layer.borderWidth = 1; c.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.09].CGColor;
+        c.clipsToBounds = YES;
+        _icon = [UIImageView new];
+        _icon.layer.cornerRadius = 9; _icon.layer.cornerCurve = kCACornerCurveContinuous; _icon.clipsToBounds = YES;
+        _name = [UILabel new];
+        _name.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        _name.textColor = UIColor.whiteColor; _name.adjustsFontSizeToFitWidth = YES; _name.minimumScaleFactor = 0.8;
+        _chip = [UILabel new];
+        _chip.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightBold];
+        _chip.textAlignment = NSTextAlignmentCenter;
+        _chip.layer.cornerRadius = 8; _chip.clipsToBounds = YES;
+        _closeMark = [UILabel new];
+        _closeMark.text = @"\u2715";
+        _closeMark.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+        _closeMark.textColor = [UIColor colorWithWhite:1 alpha:0.42];
+        _closeMark.textAlignment = NSTextAlignmentCenter;
+        for (UIView *v in @[_icon,_name,_chip,_closeMark]) [c addSubview:v];
+    }
+    return self;
+}
+- (void)configure:(NSDictionary *)row closing:(BOOL)closing queued:(BOOL)queued {
+    self.icon.image = row[@"icon"];
+    self.name.text = row[@"name"];
+    UIColor *accent; NSString *label;
+    if (closing)      { accent = [UIColor colorWithWhite:1 alpha:0.55]; label = @"\u0110ang \u0111\u00f3ng\u2026"; }
+    else if (queued)  { accent = [UIColor colorWithWhite:1 alpha:0.55]; label = @"Ch\u1edd \u0111\u00f3ng\u2026"; }
+    else {
+        NSString *kind = CTKind(row[@"bundle"]);
+        if ([kind isEqual:@"nav"])        { accent = [UIColor colorWithRed:0.22 green:0.78 blue:0.85 alpha:1]; label = @"B\u1ea3n \u0111\u1ed3"; }
+        else if ([kind isEqual:@"media"]) { accent = [UIColor colorWithRed:1 green:0.71 blue:0.24 alpha:1];  label = @"Gi\u1ea3i tr\u00ed"; }
+        else                              { accent = [UIColor colorWithWhite:0.68 alpha:1];                  label = @"\u0110ang ch\u1ea1y"; }
+    }
+    self.chip.text = label; self.chip.textColor = accent;
+    self.chip.backgroundColor = [accent colorWithAlphaComponent:0.16];
+    self.closeMark.hidden = closing || queued;
+    self.contentView.alpha = (closing || queued) ? 0.5 : 1;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = self.contentView.bounds.size.width, h = self.contentView.bounds.size.height, pad = 12;
+    CGFloat ic = MIN(40, h*0.36);
+    self.icon.frame = CGRectMake(pad, pad, ic, ic);
+    self.closeMark.frame = CGRectMake(w-27, 6, 21, 21);
+    self.name.frame = CGRectMake(pad, pad+ic+7, w-2*pad, 20);
+    CGFloat cw = MIN(w-2*pad, [self.chip sizeThatFits:CGSizeMake(999,22)].width + 18);
+    self.chip.frame = CGRectMake(pad, h-pad-22, MAX(44,cw), 22);
+}
+@end
+@implementation CTController
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
     self.rows = @[]; self.queue = [NSMutableArray new];
-    self.panel = [UIView new];
-    self.panel.backgroundColor = [UIColor colorWithWhite:0.07 alpha:1];
+    UIColor *cyan = [UIColor colorWithRed:0.22 green:0.78 blue:0.85 alpha:1];
+    UIColor *danger = [UIColor colorWithRed:1 green:0.36 blue:0.33 alpha:1];
+
+    self.panel = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark]];
     self.panel.hidden = YES;
     [self.view addSubview:self.panel];
-    self.doneButton = [self button:@"Xong" action:@selector(closePanel)];
-    self.closeAllButton = [self button:@"Đóng tất cả" action:@selector(closeAll)];
-    self.closeAllButton.backgroundColor = [UIColor colorWithRed:0.78 green:0.20 blue:0.20 alpha:1];
+    UIView *content = self.panel.contentView;
+
     self.titleLabel = [UILabel new];
-    self.titleLabel.text = @"CleanTA";
-    self.titleLabel.textAlignment = NSTextAlignmentCenter;
+    self.titleLabel.text = @"\u1ee8ng d\u1ee5ng \u0111ang ch\u1ea1y";
     self.titleLabel.textColor = UIColor.whiteColor;
-    self.titleLabel.font = [UIFont boldSystemFontOfSize:22];
+    self.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightHeavy];
+
+    self.countLabel = [UILabel new];
+    self.countLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+    self.countLabel.textColor = cyan;
+    self.countLabel.backgroundColor = [cyan colorWithAlphaComponent:0.16];
+    self.countLabel.textAlignment = NSTextAlignmentCenter;
+    self.countLabel.layer.cornerRadius = 11; self.countLabel.clipsToBounds = YES;
+
     self.status = [UILabel new];
-    self.status.font = [UIFont systemFontOfSize:15];
-    self.status.textColor = UIColor.lightGrayColor;
-    self.status.textAlignment = NSTextAlignmentCenter;
-    self.status.numberOfLines = 2;
-    self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
-    self.table.backgroundColor = self.panel.backgroundColor;
-    self.table.separatorColor = [UIColor colorWithWhite:0.25 alpha:1];
-    self.table.rowHeight = 68;
-    self.table.delegate = self; self.table.dataSource = self;
-    UIRefreshControl *refresh = [UIRefreshControl new];
-    refresh.tintColor = UIColor.lightGrayColor;
-    [refresh addTarget:self action:@selector(pullRefresh:) forControlEvents:UIControlEventValueChanged];
-    self.table.refreshControl = refresh;
-    for (UIView *v in @[self.doneButton,self.closeAllButton,self.titleLabel,self.status,self.table]) [self.panel addSubview:v];
+    self.status.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
+    self.status.textColor = [UIColor colorWithWhite:0.62 alpha:1];
+
+    self.closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.closeButton setTitle:@"\u2715" forState:UIControlStateNormal];
+    self.closeButton.titleLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+    self.closeButton.tintColor = [UIColor colorWithWhite:0.72 alpha:1];
+    self.closeButton.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+    self.closeButton.layer.cornerRadius = 20;
+    [self.closeButton addTarget:self action:@selector(closePanel) forControlEvents:UIControlEventTouchUpInside];
+
+    UICollectionViewFlowLayout *layout = [UICollectionViewFlowLayout new];
+    layout.minimumInteritemSpacing = 11; layout.minimumLineSpacing = 11;
+    self.collection = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
+    self.collection.backgroundColor = UIColor.clearColor;
+    self.collection.showsVerticalScrollIndicator = NO;
+    self.collection.delegate = self; self.collection.dataSource = self;
+    [self.collection registerClass:CTAppCell.class forCellWithReuseIdentifier:@"app"];
+
+    self.closeAllButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.closeAllButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightHeavy];
+    [self.closeAllButton setTitleColor:danger forState:UIControlStateNormal];
+    self.closeAllButton.backgroundColor = [danger colorWithAlphaComponent:0.14];
+    self.closeAllButton.layer.cornerRadius = 13; self.closeAllButton.layer.borderWidth = 1;
+    self.closeAllButton.layer.borderColor = [danger colorWithAlphaComponent:0.28].CGColor;
+    [self.closeAllButton addTarget:self action:@selector(closeAll) forControlEvents:UIControlEventTouchUpInside];
+
+    for (UIView *v in @[self.titleLabel,self.countLabel,self.status,self.closeButton,self.collection,self.closeAllButton]) [content addSubview:v];
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    CGRect bounds = self.view.bounds, safe = CGRectInset(bounds,10,8);
-    self.panel.frame = bounds;
-    CGFloat x = CGRectGetMinX(safe), y = CGRectGetMinY(safe), w = CGRectGetWidth(safe);
-    self.doneButton.frame = CGRectMake(x,y,96,46);
-    self.closeAllButton.frame = CGRectMake(x+w-150,y,150,46);
-    self.titleLabel.frame = CGRectMake(x+104,y,MAX(0,w-262),46);
-    self.status.frame = CGRectMake(x+8,y+50,w-16,40);
-    self.table.frame = CGRectMake(x,y+94,w,MAX(0,CGRectGetHeight(safe)-94));
+    self.panel.frame = self.view.bounds;
+    CGRect b = self.view.bounds;
+    CGFloat pad = 18, x = pad, w = MAX(1,CGRectGetWidth(b)-2*pad), y = pad, headH = 40;
+    self.closeButton.frame = CGRectMake(x+w-headH, y, headH, headH);
+    self.countLabel.text = [NSString stringWithFormat:@"%lu",(unsigned long)self.rows.count];
+    CGFloat cw = MAX(26, [self.countLabel sizeThatFits:CGSizeMake(999,22)].width + 16);
+    [self.titleLabel sizeToFit];
+    CGFloat tW = MIN(self.titleLabel.bounds.size.width, w-headH-cw-24);
+    self.titleLabel.frame = CGRectMake(x, y, MAX(1,tW), 26);
+    self.countLabel.frame = CGRectMake(x+tW+8, y+2, cw, 22);
+    self.status.frame = CGRectMake(x, y+29, w-headH-12, 16);
+    CGFloat footH = 48, footY = CGRectGetHeight(b)-pad-footH;
+    self.closeAllButton.frame = CGRectMake(x, footY, w, footH);
+    CGFloat top = y+53;
+    self.collection.frame = CGRectMake(x, top, w, MAX(1, footY-12-top));
+    NSInteger cols = w > 560 ? 4 : (w > 380 ? 3 : 2);
+    CGFloat iw = floor((w - (cols-1)*11)/cols);
+    CGFloat areaH = self.collection.bounds.size.height;
+    NSInteger n = MAX(1,(NSInteger)self.rows.count);
+    NSInteger rowsNeeded = (n + cols - 1)/cols;
+    CGFloat ih = rowsNeeded <= 1 ? MIN(132, areaH) : MAX(84, MIN(132, floor((areaH-11)/2)));
+    UICollectionViewFlowLayout *fl = (UICollectionViewFlowLayout *)self.collection.collectionViewLayout;
+    fl.itemSize = CGSizeMake(MAX(60,iw), MAX(60,ih));
 }
 - (BOOL)busy { return self.pending || self.closingRow || self.queue.count; }
 - (void)updateButtons {
-    self.closeAllButton.enabled = !self.busy && self.rows.count;
-    self.closeAllButton.alpha = self.closeAllButton.enabled ? 1 : 0.45;
+    BOOL on = !self.busy && self.rows.count;
+    self.closeAllButton.enabled = on;
+    self.closeAllButton.alpha = on ? 1 : 0.4;
+    self.closeAllButton.hidden = self.rows.count == 0;
+    [self.closeAllButton setTitle:[NSString stringWithFormat:@"\u0110\u00f3ng t\u1ea5t c\u1ea3 %lu \u1ee9ng d\u1ee5ng",(unsigned long)self.rows.count] forState:UIControlStateNormal];
 }
 
 #pragma mark Mở / đóng bảng
@@ -345,7 +422,6 @@ static BOOL CTGoHome(void) {
 - (void)closePanel {
     self.panel.hidden = YES;
     overlay.expanded = NO;
-    CTPanelLog(@"CLOSE panel busy=%d", self.busy);
     CTGoHome();
     if (self.busy) self.dismissStubWhenIdle = YES; else [self killStub];
 }
@@ -359,32 +435,29 @@ static BOOL CTGoHome(void) {
     CTStubMuteUntil = self.stubKillAt + 4;
     notify_set_state(requestToken,key);
     notify_post(CTRequest);
-    CTPanelLog(@"STUB kill requested pid=%d", pid);
     // SpringBoard refuses while it is still sampling a previous close; check
     // and retry (up to 3 times, 1.5 s apart) until the launcher is gone.
     static NSUInteger attempts;
     NSUInteger attempt = ++attempts;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(), ^{
         int still = CTPid(CTStubBundle);
-        if (still <= 1) { CTPanelLog(@"STUB gone"); attempts = 0; return; }
-        if (attempt >= 3) { CTPanelLog(@"STUB still running pid=%d after %lu tries", still, (unsigned long)attempt); attempts = 0; return; }
-        CTPanelLog(@"STUB still running pid=%d, retry", still);
+        if (still <= 1) { attempts = 0; return; }
+        if (attempt >= 3) { attempts = 0; return; }
         [self killStub];
     });
 }
 
 #pragma mark Danh sách
-- (void)pullRefresh:(UIRefreshControl *)r { [r endRefreshing]; if (!self.busy) [self reloadApps]; }
 - (void)reloadApps {
     if (self.loading) return;
     self.loading = YES;
-    if (!self.rows.count) self.status.text = @"Đang kiểm tra ứng dụng…";
+    if (!self.rows.count) self.status.text = @"\u0110ang ki\u1ec3m tra \u1ee9ng d\u1ee5ng\u2026";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         NSMutableArray *rows = [NSMutableArray new]; NSString *error = nil;
         @try {
             NSArray *proxies = CTProxies();
             if (!proxies || ![CTService() respondsToSelector:NSSelectorFromString(@"pidForApplication:")]) {
-                error = @"iOS này chưa cho CleanTA đọc danh sách ứng dụng.";
+                error = @"iOS n\u00e0y ch\u01b0a cho CleanTA \u0111\u1ecdc danh s\u00e1ch \u1ee9ng d\u1ee5ng.";
             } else for (id proxy in proxies) {
                 if (!CTAllowed(proxy)) continue;
                 NSString *bundle = CTGet(proxy,@"applicationIdentifier");
@@ -400,57 +473,43 @@ static BOOL CTGoHome(void) {
             [rows sortUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) {
                 return [a[@"name"] localizedCaseInsensitiveCompare:b[@"name"]];
             }];
-        } @catch (__unused NSException *e) { error = @"Không đọc được danh sách ứng dụng."; }
+        } @catch (__unused NSException *e) { error = @"Kh\u00f4ng \u0111\u1ecdc \u0111\u01b0\u1ee3c danh s\u00e1ch \u1ee9ng d\u1ee5ng."; }
         dispatch_async(dispatch_get_main_queue(), ^{
             self.loading = NO;
             self.rows = rows;
-            [self.table reloadData];
+            [self.collection reloadData];
             if (!self.busy) self.status.text = error ?: (rows.count ?
-                [NSString stringWithFormat:@"%lu ứng dụng đang mở. Chạm vào ứng dụng để đóng.",(unsigned long)rows.count] :
-                @"Không có ứng dụng nào đang mở.");
+                @"Ch\u1ea1m v\u00e0o \u1ee9ng d\u1ee5ng \u0111\u1ec3 \u0111\u00f3ng" :
+                @"Kh\u00f4ng c\u00f3 \u1ee9ng d\u1ee5ng n\u00e0o \u0111ang m\u1edf.");
             [self updateButtons];
+            [self.view setNeedsLayout];
         });
     });
 }
-- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section { return self.rows.count; }
-- (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)index {
-    UITableViewCell *cell = [table dequeueReusableCellWithIdentifier:@"app"];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"app"];
-    cell.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1];
-    cell.textLabel.textColor = UIColor.whiteColor;
-    cell.textLabel.font = [UIFont boldSystemFontOfSize:19];
-    cell.detailTextLabel.textColor = UIColor.lightGrayColor;
-    NSDictionary *row = self.rows[index.row];
-    cell.textLabel.text = row[@"name"];
-    cell.imageView.image = row[@"icon"];
-    BOOL closing = [self.closingRow[@"bundle"] isEqual:row[@"bundle"]];
-    BOOL queued = NO;
+- (NSInteger)collectionView:(UICollectionView *)cv numberOfItemsInSection:(NSInteger)section { return self.rows.count; }
+- (UICollectionViewCell *)collectionView:(UICollectionView *)cv cellForItemAtIndexPath:(NSIndexPath *)ip {
+    CTAppCell *cell = [cv dequeueReusableCellWithReuseIdentifier:@"app" forIndexPath:ip];
+    NSDictionary *row = self.rows[ip.item];
+    BOOL closing = [self.closingRow[@"bundle"] isEqual:row[@"bundle"]], queued = NO;
     for (NSDictionary *q in self.queue) if ([q[@"bundle"] isEqual:row[@"bundle"]]) { queued = YES; break; }
-    cell.detailTextLabel.text = closing ? @"Đang đóng…" : (queued ? @"Chờ đóng…" : row[@"bundle"]);
-    UILabel *mark = [UILabel new];
-    mark.text = closing || queued ? @"…" : @"✕";
-    mark.font = [UIFont boldSystemFontOfSize:22];
-    mark.textColor = closing || queued ? UIColor.lightGrayColor : [UIColor colorWithRed:1 green:0.42 blue:0.42 alpha:1];
-    [mark sizeToFit];
-    cell.accessoryView = mark;
+    [cell configure:row closing:closing queued:queued];
     return cell;
 }
-- (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)index {
-    [table deselectRowAtIndexPath:index animated:YES];
-    NSDictionary *row = self.rows[index.row];
+- (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)ip {
+    NSDictionary *row = self.rows[ip.item];
     if ([self.closingRow[@"bundle"] isEqual:row[@"bundle"]]) return;
     for (NSDictionary *q in self.queue) if ([q[@"bundle"] isEqual:row[@"bundle"]]) return;
     BOOL idle = !self.busy;
     if (idle) { self.queueTotal = 0; self.queueDone = 0; }
     [self.queue addObject:row]; self.queueTotal++;
-    [self.table reloadData];
+    [self.collection reloadData];
     if (idle) [self processNext];
 }
 - (void)closeAll {
     if (self.busy || !self.rows.count) return;
     [self.queue setArray:self.rows];
     self.queueTotal = self.queue.count; self.queueDone = 0;
-    [self.table reloadData];
+    [self.collection reloadData];
     [self processNext];
 }
 
@@ -483,7 +542,7 @@ static BOOL CTGoHome(void) {
 }
 - (void)sendClose:(NSDictionary *)row {
     self.closingRow = row;
-    [self.table reloadData];
+    [self.collection reloadData];
     [self updateButtons];
     uint64_t key = CTKey([row[@"bundle"] UTF8String],[row[@"pid"] intValue]);
     if (!key || requestToken < 0 || replyToken < 0) { [self finishCurrent:NO]; return; }
@@ -535,7 +594,7 @@ static BOOL CTGoHome(void) {
         }
     }
     self.closingRow = nil;
-    [self.table reloadData];
+    [self.collection reloadData];
     [self processNext];
 }
 @end
@@ -543,15 +602,11 @@ static BOOL CTGoHome(void) {
 static void CTShowPanel(void) {
     if (!overlay || !controller || !overlay.screen) {
         pendingShowPanel = YES;
-        CTPanelLog(@"SHOW pending overlay=%d controller=%d screen=%d", overlay != nil, controller != nil, overlay.screen != nil);
         return;
     }
     pendingShowPanel = NO;
     [controller openPanel];
     notify_post(CTShowAck);
-    CTPanelLog(@"SHOW opened scene=%@ hidden=%d level=%.0f frame=%@ panelHidden=%d",
-               overlay.windowScene.session.persistentIdentifier ?: @"(none: screen-only window)", overlay.hidden,
-               overlay.windowLevel, NSStringFromCGRect(overlay.frame), controller.panel.hidden);
 }
 
 // CarBridge can request a CleanTA launch through SpringBoard without waking the
@@ -596,9 +651,8 @@ static void CTStubActivated(NSString *source) {
     (void)source;
     static NSTimeInterval last;
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    if (now - last < 1.5 || now < CTStubMuteUntil) { CTPanelLog(@"STUB %@ ignored (debounce/mute)", source); return; }
+    if (now - last < 1.5 || now < CTStubMuteUntil) { return; }
     last = now;
-    CTPanelLog(@"STUB activated via %@", source);
     dispatch_async(dispatch_get_main_queue(), ^{ CTShowPanel(); });
 }
 
@@ -619,7 +673,6 @@ static void CTAttach(UIWindow *host) {
     if (overlay && scene && CTIsDashboard(scene) && overlay.windowScene != scene) {
         overlay.windowScene = scene; overlay.windowLevel = UIWindowLevelAlert + 300;
         [overlay refreshGeometry]; overlay.hidden = NO;
-        CTPanelLog(@"ATTACH moved overlay to scene %@", scene.session.persistentIdentifier);
     }
     if (overlay) {
         if (overlay.screen != screen && overlay.screen == UIScreen.mainScreen && screen != UIScreen.mainScreen) {
@@ -633,7 +686,6 @@ static void CTAttach(UIWindow *host) {
     // Prefer the CarPlay dashboard scene; fall back to the screen (pre-1.0.3).
     if (scene && CTIsDashboard(scene)) overlay = [[CTWindow alloc] initWithWindowScene:scene];
     else { overlay = [[CTWindow alloc] initWithFrame:screen.coordinateSpace.bounds]; overlay.screen = screen; }
-    CTPanelLog(@"ATTACH created overlay scene=%@ host=%@", overlay.windowScene.session.persistentIdentifier ?: @"(screen only)", NSStringFromClass(host.class));
     overlay.backgroundColor = UIColor.clearColor;
     overlay.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     overlay.windowLevel = UIWindowLevelAlert + 300;

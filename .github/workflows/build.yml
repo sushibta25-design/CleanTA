@@ -32,6 +32,6 @@ jobs:
         run: gmake clean package FINALPACKAGE=1
       - uses: actions/upload-artifact@v6
         with:
-          name: CleanTA-1.0.2-rootless
+          name: CleanTA-0.1.0-rootless
           path: packages/*.deb
           if-no-files-found: error

@@ -1,4 +1,4 @@
-# CleanTA 1.0.0
+# CleanTA 0.1
 
 Đóng ứng dụng đang chạy từ màn hình CarPlay. iOS 15–16, Dopamine rootless.
 
