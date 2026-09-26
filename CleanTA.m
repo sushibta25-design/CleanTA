@@ -5,11 +5,30 @@
 #import <notify.h>
 #import <dlfcn.h>
 #import <unistd.h>
+#import <fcntl.h>
 #import <signal.h>
 #import <errno.h>
 #import "CTProtocol.h"
 #import "CTUtil.h"
 #import "CTGuard.h"
+
+// Panel diagnostics (1.0.3). CarPlayApp may write /var/mobile, so lines go
+// into MultiTA's log (one file for the user to send), tagged [CleanTA].
+static void CTPanelLog(NSString *format, ...) NS_FORMAT_FUNCTION(1,2);
+static void CTPanelLog(NSString *format, ...) {
+    va_list args; va_start(args,format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args]; va_end(args);
+    static dispatch_queue_t queue; static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue = dispatch_queue_create("com.sushibta.cleanta.panellog", DISPATCH_QUEUE_SERIAL); });
+    NSDate *time = NSDate.date; NSString *process = NSBundle.mainBundle.bundleIdentifier ?: @"?";
+    dispatch_async(queue, ^{
+        @autoreleasepool {
+            NSData *data = [[NSString stringWithFormat:@"%@ [CleanTA 1.0.3] [%@] %@\n",time,process,message] dataUsingEncoding:NSUTF8StringEncoding];
+            int fd = open("/var/mobile/MultiTA-beta.log", O_WRONLY|O_CREAT|O_APPEND, 0644);
+            if (fd >= 0) { (void)write(fd,data.bytes,data.length); close(fd); }
+        }
+    });
+}
 
 static const char *CTRequest = "com.sushibta.cleanta.close.v1";
 static const char *CTReply = "com.sushibta.cleanta.result.v1";
@@ -179,15 +198,19 @@ static void CTHandleRequest(void) {
 - (void)refreshGeometry;
 @end
 @implementation CTWindow
+- (CGRect)fullBounds {
+    // Scene-based CarPlayApp: size from the dashboard scene, not the screen.
+    return self.windowScene ? self.windowScene.coordinateSpace.bounds : self.screen.coordinateSpace.bounds;
+}
 - (void)refreshGeometry {
-    CGRect full = self.screen.coordinateSpace.bounds;
+    CGRect full = [self fullBounds];
     if (CGRectIsEmpty(full) || CGRectIsInfinite(full)) return;
     if (!CGRectEqualToRect(self.frame,full)) self.frame = full;
     [self.rootViewController.view setNeedsLayout];
 }
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGRect full = self.screen.coordinateSpace.bounds;
+    CGRect full = [self fullBounds];
     if (!CGRectIsEmpty(full) && !CGRectIsInfinite(full) && !CGRectEqualToRect(self.frame,full)) self.frame = full;
 }
 // Khi bảng đóng, mọi thao tác chạm xuyên qua CarPlay.
@@ -476,11 +499,15 @@ static void CTShowPanel(void);
 static void CTShowPanel(void) {
     if (!overlay || !controller || !overlay.screen) {
         pendingShowPanel = YES;
+        CTPanelLog(@"SHOW pending overlay=%d controller=%d screen=%d", overlay != nil, controller != nil, overlay.screen != nil);
         return;
     }
     pendingShowPanel = NO;
     [controller openPanel];
     notify_post(CTShowAck);
+    CTPanelLog(@"SHOW opened scene=%@ hidden=%d level=%.0f frame=%@ panelHidden=%d",
+               overlay.windowScene.session.persistentIdentifier ?: @"(none: screen-only window)", overlay.hidden,
+               overlay.windowLevel, NSStringFromCGRect(overlay.frame), controller.panel.hidden);
 }
 
 // CarBridge can request a CleanTA launch through SpringBoard without waking the
@@ -525,15 +552,28 @@ static void CTStubActivated(NSString *source) {
     (void)source;
     static NSTimeInterval last;
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    if (now - last < 1.5 || now < CTStubMuteUntil) return;
+    if (now - last < 1.5 || now < CTStubMuteUntil) { CTPanelLog(@"STUB %@ ignored (debounce/mute)", source); return; }
     last = now;
+    CTPanelLog(@"STUB activated via %@", source);
     dispatch_async(dispatch_get_main_queue(), ^{ CTShowPanel(); });
 }
 
+// 1.0.3: a window given only a screen is never shown in scene-based
+// CarPlayApp (iOS 15/16), so the panel could stay invisible while the blank
+// CleanTA stub covered CarPlay ("frozen"). Attach to the dashboard scene.
+static BOOL CTIsDashboard(UIWindowScene *scene) {
+    return [scene.session.persistentIdentifier containsString:@"DBDashboard"];
+}
 static void CTAttach(UIWindow *host) {
     if (!host || [host isKindOfClass:CTWindow.class] || host.hidden || host.windowLevel != UIWindowLevelNormal || !host.rootViewController) return;
     UIScreen *screen = host.screen;
     if (!screen || CGRectIsEmpty(screen.coordinateSpace.bounds)) return;
+    UIWindowScene *scene = host.windowScene;
+    if (overlay && scene && CTIsDashboard(scene) && overlay.windowScene != scene) {
+        overlay.windowScene = scene; overlay.windowLevel = UIWindowLevelAlert + 100;
+        [overlay refreshGeometry]; overlay.hidden = NO;
+        CTPanelLog(@"ATTACH moved overlay to scene %@", scene.session.persistentIdentifier);
+    }
     if (overlay) {
         if (overlay.screen != screen && overlay.screen == UIScreen.mainScreen && screen != UIScreen.mainScreen) {
             overlay.hidden = YES; overlay.screen = screen;
@@ -543,9 +583,10 @@ static void CTAttach(UIWindow *host) {
         return;
     }
     controller = [CTController new];
-    // Gắn thẳng vào UIScreen CarPlay (scene đầu tiên có thể chỉ là dock).
-    overlay = [[CTWindow alloc] initWithFrame:screen.coordinateSpace.bounds];
-    overlay.screen = screen;
+    // Prefer the CarPlay dashboard scene; fall back to the screen (pre-1.0.3).
+    if (scene && CTIsDashboard(scene)) overlay = [[CTWindow alloc] initWithWindowScene:scene];
+    else { overlay = [[CTWindow alloc] initWithFrame:screen.coordinateSpace.bounds]; overlay.screen = screen; }
+    CTPanelLog(@"ATTACH created overlay scene=%@ host=%@", overlay.windowScene.session.persistentIdentifier ?: @"(screen only)", NSStringFromClass(host.class));
     overlay.backgroundColor = UIColor.clearColor;
     overlay.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     overlay.windowLevel = UIWindowLevelAlert + 100;
