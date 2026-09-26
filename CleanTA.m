@@ -23,7 +23,7 @@ static void CTPanelLog(NSString *format, ...) {
     NSDate *time = NSDate.date; NSString *process = NSBundle.mainBundle.bundleIdentifier ?: @"?";
     dispatch_async(queue, ^{
         @autoreleasepool {
-            NSData *data = [[NSString stringWithFormat:@"%@ [CleanTA 1.0.3] [%@] %@\n",time,process,message] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data = [[NSString stringWithFormat:@"%@ [CleanTA 1.0.4] [%@] %@\n",time,process,message] dataUsingEncoding:NSUTF8StringEncoding];
             int fd = open("/var/mobile/MultiTA-beta.log", O_WRONLY|O_CREAT|O_APPEND, 0644);
             if (fd >= 0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -153,7 +153,7 @@ static void CTRespond(uint64_t key, unsigned result) {
 static void CTHandleRequest(void) {
     uint64_t key = 0;
     if (notify_get_state(requestToken,&key) != NOTIFY_STATUS_OK || !CTValidKey(key)) return;
-    if (serverBusy) { CTRespond(key,3); return; }
+    if (serverBusy) { CTPanelLog(@"SB request busy key=%llx", key); CTRespond(key,3); return; }
     @try {
         NSString *target = nil;
         for (id proxy in CTProxies()) {
@@ -165,7 +165,8 @@ static void CTHandleRequest(void) {
                 target = bundle;
             }
         }
-        if (!target) { CTRespond(key,3); return; }
+        if (!target) { CTPanelLog(@"SB request no target key=%llx", key); CTRespond(key,3); return; }
+        CTPanelLog(@"SB close %@", target);
         serverBusy = YES;
         if (!CTTerminate(target)) {
             id service = CTService();
@@ -241,6 +242,35 @@ static CTController *controller;
 static BOOL pendingShowPanel;
 static void CTShowPanel(void);
 
+// 1.0.4: "Xong" left CarPlay on the blank launcher when the stub close was
+// refused (SpringBoard busy sampling the previous close for ~3 s): CarPlay
+// looked frozen. Leave the stub the way the Dock Home button does first.
+static void CTFindDashboard(UIViewController *vc, id *out) {
+    if (!vc || *out) return;
+    @try {
+        if ([vc respondsToSelector:NSSelectorFromString(@"environment")]) {
+            id env = [vc valueForKey:@"environment"];
+            if ([NSStringFromClass([env class]) isEqual:@"DBDashboard"]) { *out = env; return; }
+        }
+    } @catch (__unused NSException *e) {}
+    for (UIViewController *child in vc.childViewControllers) CTFindDashboard(child,out);
+    CTFindDashboard(vc.presentedViewController,out);
+}
+static BOOL CTGoHome(void) {
+    id dash = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] || ![scene.session.persistentIdentifier containsString:@"DBDashboard"]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) CTFindDashboard(w.rootViewController,&dash);
+    }
+    SEL tapped = NSSelectorFromString(@"_homeTapped:");
+    if (dash && [dash respondsToSelector:tapped]) {
+        @try { ((void(*)(id,SEL,id))objc_msgSend)(dash,tapped,nil); CTPanelLog(@"HOME via _homeTapped:"); return YES; }
+        @catch (NSException *e) { CTPanelLog(@"HOME error %@", e.name); }
+    }
+    CTPanelLog(@"HOME unavailable dashboard=%@", NSStringFromClass([dash class]));
+    return NO;
+}
+
 @implementation CTController
 - (UIButton *)button:(NSString *)title action:(SEL)action {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -315,6 +345,8 @@ static void CTShowPanel(void);
 - (void)closePanel {
     self.panel.hidden = YES;
     overlay.expanded = NO;
+    CTPanelLog(@"CLOSE panel busy=%d", self.busy);
+    CTGoHome();
     if (self.busy) self.dismissStubWhenIdle = YES; else [self killStub];
 }
 - (void)killStub {
@@ -327,6 +359,18 @@ static void CTShowPanel(void);
     CTStubMuteUntil = self.stubKillAt + 4;
     notify_set_state(requestToken,key);
     notify_post(CTRequest);
+    CTPanelLog(@"STUB kill requested pid=%d", pid);
+    // SpringBoard refuses while it is still sampling a previous close; check
+    // and retry (up to 3 times, 1.5 s apart) until the launcher is gone.
+    static NSUInteger attempts;
+    NSUInteger attempt = ++attempts;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(), ^{
+        int still = CTPid(CTStubBundle);
+        if (still <= 1) { CTPanelLog(@"STUB gone"); attempts = 0; return; }
+        if (attempt >= 3) { CTPanelLog(@"STUB still running pid=%d after %lu tries", still, (unsigned long)attempt); attempts = 0; return; }
+        CTPanelLog(@"STUB still running pid=%d, retry", still);
+        [self killStub];
+    });
 }
 
 #pragma mark Danh sách
