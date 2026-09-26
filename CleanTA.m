@@ -280,7 +280,7 @@ static NSString *CTKind(NSString *bundle) {
         _name.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
         _name.textColor = UIColor.whiteColor; _name.adjustsFontSizeToFitWidth = YES; _name.minimumScaleFactor = 0.8;
         _chip = [UILabel new];
-        _chip.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightBold];
+        _chip.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
         _chip.textAlignment = NSTextAlignmentCenter;
         _chip.layer.cornerRadius = 8; _chip.clipsToBounds = YES;
         _closeMark = [UILabel new];
@@ -312,12 +312,13 @@ static NSString *CTKind(NSString *bundle) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat w = self.contentView.bounds.size.width, h = self.contentView.bounds.size.height, pad = 12;
-    CGFloat ic = MIN(40, h*0.36);
+    CGFloat ic = MIN(38, h*0.30);
     self.icon.frame = CGRectMake(pad, pad, ic, ic);
-    self.closeMark.frame = CGRectMake(w-27, 6, 21, 21);
-    self.name.frame = CGRectMake(pad, pad+ic+7, w-2*pad, 20);
-    CGFloat cw = MIN(w-2*pad, [self.chip sizeThatFits:CGSizeMake(999,22)].width + 18);
-    self.chip.frame = CGRectMake(pad, h-pad-22, MAX(44,cw), 22);
+    self.closeMark.frame = CGRectMake(w-26, 7, 20, 20);
+    CGFloat nameY = pad + ic + 8;
+    self.name.frame = CGRectMake(pad, nameY, w-2*pad, 19);
+    CGFloat cw = MIN(w-2*pad, [self.chip sizeThatFits:CGSizeMake(999,20)].width + 18);
+    self.chip.frame = CGRectMake(pad, nameY + 19 + 6, MAX(44,cw), 20);
 }
 @end
 @implementation CTController
@@ -397,7 +398,10 @@ static NSString *CTKind(NSString *bundle) {
     CGFloat areaH = self.collection.bounds.size.height;
     NSInteger n = MAX(1,(NSInteger)self.rows.count);
     NSInteger rowsNeeded = (n + cols - 1)/cols;
-    CGFloat ih = rowsNeeded <= 1 ? MIN(132, areaH) : MAX(84, MIN(132, floor((areaH-11)/2)));
+    CGFloat need = 12 + MIN(38,132*0.30) + 8 + 19 + 6 + 20 + 12; // icon+name+chip stack, ~113
+    CGFloat ih;
+    if (rowsNeeded <= 1) ih = MAX(need, MIN(150, areaH));
+    else { CGFloat two = floor((areaH-11)/2); ih = two >= need ? MIN(150, two) : need; }
     UICollectionViewFlowLayout *fl = (UICollectionViewFlowLayout *)self.collection.collectionViewLayout;
     fl.itemSize = CGSizeMake(MAX(60,iw), MAX(60,ih));
 }
