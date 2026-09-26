@@ -23,7 +23,7 @@ static void CTPanelLog(NSString *format, ...) {
     NSDate *time = NSDate.date; NSString *process = NSBundle.mainBundle.bundleIdentifier ?: @"?";
     dispatch_async(queue, ^{
         @autoreleasepool {
-            NSData *data = [[NSString stringWithFormat:@"%@ [CleanTA 1.0.4] [%@] %@\n",time,process,message] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *data = [[NSString stringWithFormat:@"%@ [CleanTA 1.0.5] [%@] %@\n",time,process,message] dataUsingEncoding:NSUTF8StringEncoding];
             int fd = open("/var/mobile/MultiTA-beta.log", O_WRONLY|O_CREAT|O_APPEND, 0644);
             if (fd >= 0) { (void)write(fd,data.bytes,data.length); close(fd); }
         }
@@ -602,6 +602,9 @@ static void CTStubActivated(NSString *source) {
     dispatch_async(dispatch_get_main_queue(), ^{ CTShowPanel(); });
 }
 
+// 1.0.5: level Alert+300. MultiTA's Dock swipe zone (Alert+200, top-left
+// 60x70) sat above the panel and swallowed taps on "Xong". The window passes
+// every touch through while the panel is closed (see -hitTest:).
 // 1.0.3: a window given only a screen is never shown in scene-based
 // CarPlayApp (iOS 15/16), so the panel could stay invisible while the blank
 // CleanTA stub covered CarPlay ("frozen"). Attach to the dashboard scene.
@@ -614,7 +617,7 @@ static void CTAttach(UIWindow *host) {
     if (!screen || CGRectIsEmpty(screen.coordinateSpace.bounds)) return;
     UIWindowScene *scene = host.windowScene;
     if (overlay && scene && CTIsDashboard(scene) && overlay.windowScene != scene) {
-        overlay.windowScene = scene; overlay.windowLevel = UIWindowLevelAlert + 100;
+        overlay.windowScene = scene; overlay.windowLevel = UIWindowLevelAlert + 300;
         [overlay refreshGeometry]; overlay.hidden = NO;
         CTPanelLog(@"ATTACH moved overlay to scene %@", scene.session.persistentIdentifier);
     }
@@ -633,7 +636,7 @@ static void CTAttach(UIWindow *host) {
     CTPanelLog(@"ATTACH created overlay scene=%@ host=%@", overlay.windowScene.session.persistentIdentifier ?: @"(screen only)", NSStringFromClass(host.class));
     overlay.backgroundColor = UIColor.clearColor;
     overlay.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    overlay.windowLevel = UIWindowLevelAlert + 100;
+    overlay.windowLevel = UIWindowLevelAlert + 300;
     overlay.rootViewController = controller;
     [controller loadViewIfNeeded];
     [overlay refreshGeometry];
